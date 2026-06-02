@@ -35,6 +35,21 @@ type ipAPIResponse struct {
 	Query       string  `json:"query"`
 }
 
+type geoLookupFailure struct {
+	IP      string
+	Message string
+}
+
+func isPermanentGeoLookupFailure(message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	switch msg {
+	case "reserved range", "private range", "invalid query":
+		return true
+	default:
+		return false
+	}
+}
+
 // GeoIPService calls ip-api.com batch endpoint (no in-memory cache).
 type GeoIPService struct {
 	client               *http.Client
@@ -88,29 +103,34 @@ func (g *GeoIPService) Metrics(queuePending, queuedInMemory int) GeoIPMetricsSna
 }
 
 // LookupBatch performs one ip-api.com batch POST for up to batchSize IPs.
-// Returns map[ip]GeoInfo for successful lookups only.
-func (g *GeoIPService) LookupBatch(ctx context.Context, ips []string) (map[string]models.GeoInfo, error) {
+// Returns successful lookups and failed lookups returned by ip-api.
+func (g *GeoIPService) LookupBatch(ctx context.Context, ips []string) (map[string]models.GeoInfo, []geoLookupFailure, error) {
 	if len(ips) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(ips) > g.batchSize {
-		return nil, fmt.Errorf("geoip batch size %d exceeds limit %d", len(ips), g.batchSize)
+		return nil, nil, fmt.Errorf("geoip batch size %d exceeds limit %d", len(ips), g.batchSize)
 	}
 
 	if err := g.limiter.Wait(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	responses, apiRemaining, err := g.doBatchHTTP(ctx, ips)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	result := make(map[string]models.GeoInfo, len(responses))
+	failures := make([]geoLookupFailure, 0)
 	var success, failed int
 	for _, r := range responses {
 		if r.Status != "success" {
 			failed++
+			failures = append(failures, geoLookupFailure{
+				IP:      r.Query,
+				Message: r.Message,
+			})
 			g.logger.Warn("geoip lookup failed for ip",
 				"ip", r.Query,
 				"message", r.Message,
@@ -135,7 +155,7 @@ func (g *GeoIPService) LookupBatch(ctx context.Context, ips []string) (map[strin
 		g.logger.Debug("geoip batch api quota", "remaining", apiRemaining)
 	}
 
-	return result, nil
+	return result, failures, nil
 }
 
 // RecordDBUpdates records proxies written to the database.

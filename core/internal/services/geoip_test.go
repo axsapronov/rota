@@ -38,9 +38,12 @@ func TestGeoIPService_LookupBatchSingleHTTP(t *testing.T) {
 	log := logger.New("error")
 	g := newGeoIPServiceForTest(log, testGeoIPConfig(), srv.URL)
 
-	geos, err := g.LookupBatch(context.Background(), []string{"8.8.8.8", "1.1.1.1"})
+	geos, failed, err := g.LookupBatch(context.Background(), []string{"8.8.8.8", "1.1.1.1"})
 	if err != nil {
 		t.Fatalf("LookupBatch: %v", err)
+	}
+	if len(failed) != 0 {
+		t.Fatalf("failed = %d, want 0", len(failed))
 	}
 	if len(geos) != 2 {
 		t.Fatalf("results = %d, want 2", len(geos))
@@ -76,9 +79,12 @@ func TestGeoIPService_Retry429ThenSuccess(t *testing.T) {
 	log := logger.New("error")
 	g := newGeoIPServiceForTest(log, testGeoIPConfig(), srv.URL)
 
-	geos, err := g.LookupBatch(context.Background(), []string{"8.8.8.8"})
+	geos, failed, err := g.LookupBatch(context.Background(), []string{"8.8.8.8"})
 	if err != nil {
 		t.Fatalf("LookupBatch: %v", err)
+	}
+	if len(failed) != 0 {
+		t.Fatalf("failed = %d, want 0", len(failed))
 	}
 	if geos["8.8.8.8"].CountryCode != "US" {
 		t.Fatalf("country = %q, want US", geos["8.8.8.8"].CountryCode)
@@ -106,10 +112,10 @@ func TestGeoIPService_BatchRateLimiterWaits(t *testing.T) {
 
 	ctx := context.Background()
 	start := time.Now()
-	if _, err := g.LookupBatch(ctx, []string{"1.1.1.1"}); err != nil {
+	if _, _, err := g.LookupBatch(ctx, []string{"1.1.1.1"}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if _, err := g.LookupBatch(ctx, []string{"2.2.2.2"}); err != nil {
+	if _, _, err := g.LookupBatch(ctx, []string{"2.2.2.2"}); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -152,5 +158,44 @@ func TestGeoAddressQueue_EnqueueDedupe(t *testing.T) {
 	}
 	if len(q.ch) != 2 {
 		t.Fatalf("channel len = %d, want 2", len(q.ch))
+	}
+}
+
+func TestGeoIPService_LookupBatchReturnsFailedEntries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]ipAPIResponse{
+			{Status: "success", CountryCode: "US", Query: "8.8.8.8"},
+			{Status: "fail", Message: "reserved range", Query: "240.0.0.1"},
+		})
+	}))
+	defer srv.Close()
+
+	log := logger.New("error")
+	g := newGeoIPServiceForTest(log, testGeoIPConfig(), srv.URL)
+
+	geos, failed, err := g.LookupBatch(context.Background(), []string{"8.8.8.8", "240.0.0.1"})
+	if err != nil {
+		t.Fatalf("LookupBatch: %v", err)
+	}
+	if len(geos) != 1 {
+		t.Fatalf("success geos = %d, want 1", len(geos))
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed = %d, want 1", len(failed))
+	}
+	if failed[0].IP != "240.0.0.1" || failed[0].Message != "reserved range" {
+		t.Fatalf("unexpected failed entry: %+v", failed[0])
+	}
+}
+
+func TestIsPermanentGeoLookupFailure(t *testing.T) {
+	permanent := []string{"reserved range", "private range", "invalid query"}
+	for _, msg := range permanent {
+		if !isPermanentGeoLookupFailure(msg) {
+			t.Fatalf("expected permanent failure for %q", msg)
+		}
+	}
+	if isPermanentGeoLookupFailure("timeout") {
+		t.Fatal("timeout must not be treated as permanent")
 	}
 }

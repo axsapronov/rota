@@ -433,13 +433,22 @@ func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string)
 		"db_backlog", backlog,
 	)
 
-	geos, err := s.geoSvc.LookupBatch(ctx, ips)
+	geos, lookupFailures, err := s.geoSvc.LookupBatch(ctx, ips)
 	if err != nil {
 		s.logger.Warn("geo batch lookup failed",
 			"ips", len(ips),
 			"error", err,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+	}
+	for _, failure := range lookupFailures {
+		if !isPermanentGeoLookupFailure(failure.Message) {
+			continue
+		}
+		for _, addr := range ipToAddrs[failure.IP] {
+			s.markGeoSkipped(ctx, addr, failure.Message)
+			s.markProxyFailedByPolicy(ctx, addr, failure.Message)
+		}
 	}
 
 	updated := 0
@@ -468,7 +477,7 @@ func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string)
 
 	s.geoSvc.RecordDBUpdates(updated)
 
-	lookupFail := len(preFailed) + (len(ips) - len(geos))
+	lookupFail := len(preFailed) + len(lookupFailures)
 	s.logger.Info("geo batch done",
 		"ips", len(ips),
 		"lookup_ok", len(geos),
