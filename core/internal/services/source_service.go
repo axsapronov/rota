@@ -133,8 +133,8 @@ func NewSourceService(
 		geoSvc:     geoSvc,
 		logger:     log,
 		client:     &http.Client{Timeout: 30 * time.Second},
-		stopCh:   make(chan struct{}),
-		geoQueue: newGeoAddressQueue(),
+		stopCh:     make(chan struct{}),
+		geoQueue:   newGeoAddressQueue(),
 	}
 }
 
@@ -411,25 +411,17 @@ func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string)
 	start := time.Now()
 	backlog, _ := s.countProxiesWithoutGeo(ctx)
 
-	ipToAddrs := make(map[string][]string)
-	var ips []string
+	ipToAddrs, ips, preFailed := buildGeoBatch(addresses)
 	skipped := 0
-	for _, addr := range addresses {
-		ip := extractIP(addr)
-		if ip == "" {
-			s.markGeoSkipped(ctx, addr, "unparseable_address")
-			skipped++
-			continue
-		}
-		if isSkippableGeoIP(ip) {
-			s.markGeoSkipped(ctx, addr, "reserved_or_private_ip")
-			skipped++
-			continue
-		}
-		if _, seen := ipToAddrs[ip]; !seen {
-			ips = append(ips, ip)
-		}
-		ipToAddrs[ip] = append(ipToAddrs[ip], addr)
+	for _, failure := range preFailed {
+		s.markGeoSkipped(ctx, failure.Address, failure.Reason)
+		s.markProxyFailedByPolicy(ctx, failure.Address, failure.Reason)
+		s.logger.Warn("geoip lookup failed for ip",
+			"ip", failure.IP,
+			"message", failure.Reason,
+			"address", failure.Address,
+		)
+		skipped++
 	}
 	if skipped > 0 {
 		s.logger.Debug("geo batch skipped addresses", "skipped", skipped)
@@ -476,7 +468,7 @@ func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string)
 
 	s.geoSvc.RecordDBUpdates(updated)
 
-	lookupFail := len(ips) - len(geos)
+	lookupFail := len(preFailed) + (len(ips) - len(geos))
 	s.logger.Info("geo batch done",
 		"ips", len(ips),
 		"lookup_ok", len(geos),
@@ -486,6 +478,36 @@ func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string)
 		"queue_len", s.geoQueue.Len(),
 		"db_backlog", backlog,
 	)
+}
+
+type preFailedGeoAddress struct {
+	Address string
+	IP      string
+	Reason  string
+}
+
+func buildGeoBatch(addresses []string) (map[string][]string, []string, []preFailedGeoAddress) {
+	ipToAddrs := make(map[string][]string)
+	ips := make([]string, 0, len(addresses))
+	preFailed := make([]preFailedGeoAddress, 0)
+
+	for _, addr := range addresses {
+		ip := extractIP(addr)
+		classification := classifyIPForGeo(ip)
+		if classification.SkipGeo {
+			preFailed = append(preFailed, preFailedGeoAddress{
+				Address: addr,
+				IP:      ip,
+				Reason:  classification.Reason,
+			})
+			continue
+		}
+		if _, seen := ipToAddrs[ip]; !seen {
+			ips = append(ips, ip)
+		}
+		ipToAddrs[ip] = append(ipToAddrs[ip], addr)
+	}
+	return ipToAddrs, ips, preFailed
 }
 
 // GeoIPMetrics returns combined GeoIP service and queue metrics.
@@ -542,6 +564,25 @@ func (s *SourceService) markGeoSkipped(ctx context.Context, address, reason stri
 		return
 	}
 	s.logger.Debug("geo lookup skipped", "address", address, "reason", reason)
+}
+
+func (s *SourceService) markProxyFailedByPolicy(ctx context.Context, address, reason string) {
+	if s.proxyRepo == nil {
+		return
+	}
+	_, err := s.proxyRepo.GetDB().Pool.Exec(ctx,
+		`UPDATE proxies
+		 SET status = 'failed',
+		     last_error = $2,
+		     last_check = NOW(),
+		     updated_at = NOW()
+		 WHERE address = $1`,
+		address,
+		reason,
+	)
+	if err != nil {
+		s.logger.Warn("failed to mark proxy failed by policy", "address", address, "reason", reason, "error", err)
+	}
 }
 
 func (s *SourceService) filterAddressesNeedingGeo(ctx context.Context, addresses []string) ([]string, error) {
