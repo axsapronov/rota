@@ -10,6 +10,11 @@ export interface Proxy {
   avg_response_time: number
   last_check: string
   username?: string
+  country_code?: string
+  country_name?: string
+  region_name?: string
+  city_name?: string
+  isp?: string
   created_at: string
   updated_at: string
 }

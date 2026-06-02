@@ -74,8 +74,11 @@ import {
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api } from "@/lib/api"
-import { Proxy } from "@/lib/types"
+import { GeoSummaryItem, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
+
+const FLAG_CDN = (cc: string) =>
+  `https://flagcdn.com/w20/${cc.toLowerCase()}.png`
 
 export default function ProxiesPage() {
   const [data, setData] = React.useState<Proxy[]>([])
@@ -86,7 +89,9 @@ export default function ProxiesPage() {
   const [editingProxy, setEditingProxy] = React.useState<Proxy | null>(null)
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
+  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({
+    country: false,
+  })
   const [rowSelection, setRowSelection] = React.useState({})
   const [pagination, setPagination] = React.useState({
     page: 1,
@@ -98,6 +103,8 @@ export default function ProxiesPage() {
   const [debouncedSearchQuery, setDebouncedSearchQuery] = React.useState("")
   const [statusFilter, setStatusFilter] = React.useState<string>("all")
   const [protocolFilter, setProtocolFilter] = React.useState<string>("all")
+  const [countryFilter, setCountryFilter] = React.useState<string>("all")
+  const [geoCountries, setGeoCountries] = React.useState<GeoSummaryItem[]>([])
 
   const [newProxy, setNewProxy] = React.useState({
     address: "",
@@ -132,6 +139,12 @@ export default function ProxiesPage() {
     return () => clearTimeout(timer)
   }, [searchQuery])
 
+  React.useEffect(() => {
+    api.getGeoByCountry()
+      .then((res) => setGeoCountries(res.geo))
+      .catch((err) => console.error("Failed to load geo countries:", err))
+  }, [])
+
   const fetchProxies = React.useCallback(async () => {
     try {
       setIsLoading(true)
@@ -146,6 +159,7 @@ export default function ProxiesPage() {
         search: debouncedSearchQuery || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         protocol: protocolFilter === "all" ? undefined : protocolFilter,
+        country_code: countryFilter === "all" ? undefined : countryFilter,
         sort: sortField,
         order: sortOrder as "asc" | "desc" | undefined,
       })
@@ -156,7 +170,7 @@ export default function ProxiesPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, sorting])
+  }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, countryFilter, sorting])
 
   React.useEffect(() => {
     fetchProxies()
@@ -525,6 +539,36 @@ export default function ProxiesPage() {
       ),
     },
     {
+      id: "country",
+      accessorFn: (row) => row.country_code ?? "",
+      header: "Country",
+      cell: ({ row }) => {
+        const proxy = row.original
+        if (!proxy.country_code) {
+          return <span className="text-muted-foreground">—</span>
+        }
+        return (
+          <div className="flex items-center gap-2 min-w-[120px]">
+            <img
+              src={FLAG_CDN(proxy.country_code)}
+              alt={proxy.country_code}
+              className="h-3 shrink-0"
+            />
+            <div className="truncate">
+              <div className="text-sm font-medium truncate">
+                {proxy.country_name ?? proxy.country_code}
+              </div>
+              {(proxy.city_name || proxy.region_name) && (
+                <div className="text-xs text-muted-foreground truncate">
+                  {[proxy.city_name, proxy.region_name].filter(Boolean).join(", ")}
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      },
+    },
+    {
       accessorKey: "status",
       header: ({ column }) => {
         return (
@@ -580,7 +624,9 @@ export default function ProxiesPage() {
       },
     },
     {
+      id: "success_rate",
       accessorKey: "success_rate",
+      meta: { label: "Success Rate" },
       header: ({ column }) => {
         return (
           <Button
@@ -598,7 +644,9 @@ export default function ProxiesPage() {
       },
     },
     {
+      id: "avg_response_time",
       accessorKey: "avg_response_time",
+      meta: { label: "Avg Response" },
       header: ({ column }) => {
         return (
           <Button
@@ -616,7 +664,9 @@ export default function ProxiesPage() {
       },
     },
     {
+      id: "last_check",
       accessorKey: "last_check",
+      meta: { label: "Last Check" },
       header: ({ column }) => {
         return (
           <Button
@@ -805,7 +855,7 @@ export default function ProxiesPage() {
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="icon" className="relative">
                     <Filter className="h-4 w-4" />
-                    {(statusFilter !== "all" || protocolFilter !== "all") && (
+                    {(statusFilter !== "all" || protocolFilter !== "all" || countryFilter !== "all") && (
                       <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-primary" />
                     )}
                   </Button>
@@ -856,6 +906,36 @@ export default function ProxiesPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <DropdownMenuSeparator />
+                  <div className="px-2 py-2">
+                    <Label className="text-xs text-muted-foreground mb-2 block">Country</Label>
+                    <Select
+                      value={countryFilter}
+                      onValueChange={(value) => {
+                        setCountryFilter(value)
+                        setPagination(prev => ({ ...prev, page: 1 }))
+                      }}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="All countries" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All countries</SelectItem>
+                        {geoCountries.map((g) => (
+                          <SelectItem key={g.country_code} value={g.country_code}>
+                            <span className="flex items-center gap-2">
+                              <img
+                                src={FLAG_CDN(g.country_code)}
+                                alt={g.country_code}
+                                className="h-3"
+                              />
+                              {g.country_name} ({g.country_code})
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </DropdownMenuContent>
               </DropdownMenu>
               <DropdownMenu>
@@ -869,16 +949,21 @@ export default function ProxiesPage() {
                     .getAllColumns()
                     .filter((column) => column.getCanHide())
                     .map((column) => {
+                      const label =
+                        (column.columnDef.meta as { label?: string } | undefined)?.label ??
+                        column.id
+                          .split("_")
+                          .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                          .join(" ")
                       return (
                         <DropdownMenuCheckboxItem
                           key={column.id}
-                          className="capitalize"
                           checked={column.getIsVisible()}
                           onCheckedChange={(value) =>
                             column.toggleVisibility(!!value)
                           }
                         >
-                          {column.id}
+                          {label}
                         </DropdownMenuCheckboxItem>
                       )
                     })}

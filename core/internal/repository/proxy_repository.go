@@ -28,7 +28,7 @@ func (r *ProxyRepository) GetDB() *database.DB {
 }
 
 // List retrieves proxies with pagination and filters
-func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, status, protocol, sortField, sortOrder string) ([]models.ProxyWithStats, int, error) {
+func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, status, protocol, countryCode, sortField, sortOrder string) ([]models.ProxyWithStats, int, error) {
 	// Build WHERE clause
 	whereClauses := []string{}
 	args := []interface{}{}
@@ -50,6 +50,12 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 	if protocol != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("protocol = $%d", argPos))
 		args = append(args, protocol)
+		argPos++
+	}
+
+	if countryCode != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("country_code = $%d", argPos))
+		args = append(args, countryCode)
 		argPos++
 	}
 

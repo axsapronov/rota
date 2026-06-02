@@ -155,6 +155,7 @@ class ApiClient {
     search?: string
     status?: string
     protocol?: string
+    country_code?: string
     sort?: string
     order?: "asc" | "desc"
   }): Promise<ProxiesResponse> {
