@@ -65,6 +65,14 @@ export interface LogsResponse {
   }
 }
 
+export interface GeoIPMetrics {
+  queue_pending: number
+  processed_last_10m: number
+  lookups_last_minute: number
+  queries_per_minute: number
+  usage_percent_1m: number
+}
+
 export interface SystemMetrics {
   memory: {
     total: number
@@ -89,6 +97,7 @@ export interface SystemMetrics {
     mem_alloc: number
     mem_sys: number
   }
+  geoip?: GeoIPMetrics
 }
 
 export interface Settings {

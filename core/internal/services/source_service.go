@@ -90,6 +90,12 @@ type ProxyTester interface {
 	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
 }
 
+const (
+	geoQueueSize     = 32
+	geoEnrichChunk   = 200
+	geoSyncDebounce  = 30 * time.Second
+)
+
 // SourceService fetches proxy lists from remote URLs and imports them into the DB.
 type SourceService struct {
 	sourceRepo *repository.SourceRepository
@@ -102,6 +108,13 @@ type SourceService struct {
 
 	mu     sync.Mutex
 	stopCh chan struct{}
+
+	geoCh        chan []string
+	geoPending   map[string]struct{}
+	geoMu        sync.Mutex
+	geoSyncMu    sync.Mutex
+	geoSyncTimer *time.Timer
+
 }
 
 // NewSourceService creates a new SourceService.
@@ -120,6 +133,8 @@ func NewSourceService(
 		logger:     log,
 		client:     &http.Client{Timeout: 30 * time.Second},
 		stopCh:     make(chan struct{}),
+		geoCh:      make(chan []string, geoQueueSize),
+		geoPending: make(map[string]struct{}),
 	}
 }
 
@@ -128,8 +143,10 @@ func (s *SourceService) SetHealthChecker(t ProxyTester) {
 	s.tester = t
 }
 
-// Start runs a background goroutine that checks for due sources every minute.
+// Start runs background schedulers: geo enrichment worker and due-source fetcher.
 func (s *SourceService) Start(ctx context.Context) {
+	go s.runGeoWorker(ctx)
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
@@ -268,10 +285,74 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 		}
 	}
 
-	// Enrich geo data in the background
-	go s.enrichGeo(context.Background(), addresses)
+	s.enqueueGeo(addresses)
 
 	return created, total, nil
+}
+
+// enqueueGeo adds addresses to the single geo enrichment worker queue (deduped).
+func (s *SourceService) enqueueGeo(addresses []string) int {
+	if len(addresses) == 0 {
+		return 0
+	}
+	var batch []string
+	s.geoMu.Lock()
+	for _, addr := range addresses {
+		if _, ok := s.geoPending[addr]; ok {
+			continue
+		}
+		s.geoPending[addr] = struct{}{}
+		batch = append(batch, addr)
+	}
+	s.geoMu.Unlock()
+	if len(batch) == 0 {
+		return 0
+	}
+	s.geoCh <- batch
+	return len(batch)
+}
+
+func (s *SourceService) releaseGeoPending(addresses []string) {
+	s.geoMu.Lock()
+	for _, addr := range addresses {
+		delete(s.geoPending, addr)
+	}
+	s.geoMu.Unlock()
+}
+
+func (s *SourceService) runGeoWorker(ctx context.Context) {
+	s.logger.Info("geo enrichment worker started")
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("geo enrichment worker stopped")
+			return
+		case addrs := <-s.geoCh:
+			updated := s.enrichGeo(ctx, addrs)
+			s.releaseGeoPending(addrs)
+			s.geoSvc.recordProcessed(updated)
+			s.scheduleSyncPoolsDebounced(ctx)
+		}
+	}
+}
+
+// GeoIPMetrics returns combined GeoIP service and queue metrics.
+func (s *SourceService) GeoIPMetrics() GeoIPMetricsSnapshot {
+	s.geoMu.Lock()
+	pending := len(s.geoPending)
+	s.geoMu.Unlock()
+	return s.geoSvc.MetricsSnapshot(pending)
+}
+
+func (s *SourceService) scheduleSyncPoolsDebounced(ctx context.Context) {
+	s.geoSyncMu.Lock()
+	defer s.geoSyncMu.Unlock()
+	if s.geoSyncTimer != nil {
+		s.geoSyncTimer.Stop()
+	}
+	s.geoSyncTimer = time.AfterFunc(geoSyncDebounce, func() {
+		s.syncAllPools(ctx)
+	})
 }
 
 // bulkUpsert upserts proxies. Returns (created, failed).
@@ -292,15 +373,17 @@ func (s *SourceService) bulkUpsert(ctx context.Context, proxies []models.CreateP
 }
 
 // enrichGeo fetches geo data for the given addresses and updates the DB.
-func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
+// Returns the number of proxies updated in the database.
+func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) int {
 	if len(addresses) == 0 {
-		return
+		return 0
 	}
 	geos := s.geoSvc.EnrichProxies(ctx, addresses)
 	if len(geos) == 0 {
-		return
+		return 0
 	}
 
+	updated := 0
 	for addr, geo := range geos {
 		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
 			UPDATE proxies SET
@@ -317,54 +400,46 @@ func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
 			geo.Latitude, geo.Longitude, geo.ISP, addr,
 		); err != nil {
 			s.logger.Warn("failed to update geo for proxy", "address", addr, "error", err)
+		} else {
+			updated++
 		}
 	}
+	return updated
 }
 
-// EnrichAll re-runs geo enrichment for all proxies that have no geo data yet.
+// EnrichAll queues geo enrichment for all proxies without geo data.
 func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
-	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
-		`SELECT address FROM proxies WHERE country_code IS NULL LIMIT 500`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
-	var addresses []string
-	for rows.Next() {
-		var addr string
-		if err := rows.Scan(&addr); err != nil {
-			continue
+	queued := 0
+	offset := 0
+	for {
+		rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+			`SELECT address FROM proxies WHERE country_code IS NULL ORDER BY address LIMIT $1 OFFSET $2`,
+			geoEnrichChunk, offset,
+		)
+		if err != nil {
+			return queued, err
 		}
-		addresses = append(addresses, addr)
+
+		var addresses []string
+		for rows.Next() {
+			var addr string
+			if err := rows.Scan(&addr); err != nil {
+				continue
+			}
+			addresses = append(addresses, addr)
+		}
+		rows.Close()
+
+		if len(addresses) == 0 {
+			break
+		}
+		queued += s.enqueueGeo(addresses)
+		offset += len(addresses)
+		if len(addresses) < geoEnrichChunk {
+			break
+		}
 	}
-	rows.Close()
-
-	if len(addresses) == 0 {
-		return 0, nil
-	}
-
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
-	for addr, geo := range geos {
-		s.proxyRepo.GetDB().Pool.Exec(ctx, `
-			UPDATE proxies SET
-				country_code   = $1,
-				country_name   = $2,
-				region_name    = $3,
-				city_name      = $4,
-				latitude       = $5,
-				longitude      = $6,
-				isp            = $7,
-				geo_updated_at = NOW()
-			WHERE address = $8
-		`, geo.CountryCode, geo.CountryName, geo.RegionName, geo.CityName,
-			geo.Latitude, geo.Longitude, geo.ISP, addr)
-	}
-
-	// Re-sync pools now that geo data has changed
-	go s.syncAllPools(context.Background())
-
-	return len(geos), nil
+	return queued, nil
 }
 
 // parseProxyList parses a proxy list file, one entry per line.

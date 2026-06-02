@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -14,22 +15,30 @@ import (
 
 // MetricsHandler handles system metrics requests
 type MetricsHandler struct {
-	logger *logger.Logger
+	logger    *logger.Logger
+	geoSource geoMetricsProvider
+}
+
+// geoMetricsProvider supplies GeoIP enrichment metrics (implemented by SourceService).
+type geoMetricsProvider interface {
+	GeoIPMetrics() services.GeoIPMetricsSnapshot
 }
 
 // NewMetricsHandler creates a new metrics handler
-func NewMetricsHandler(log *logger.Logger) *MetricsHandler {
+func NewMetricsHandler(log *logger.Logger, geoSource geoMetricsProvider) *MetricsHandler {
 	return &MetricsHandler{
-		logger: log,
+		logger:    log,
+		geoSource: geoSource,
 	}
 }
 
 // SystemMetrics represents system resource metrics
 type SystemMetrics struct {
-	Memory  MemoryMetrics  `json:"memory"`
-	CPU     CPUMetrics     `json:"cpu"`
-	Disk    DiskMetrics    `json:"disk"`
-	Runtime RuntimeMetrics `json:"runtime"`
+	Memory  MemoryMetrics               `json:"memory"`
+	CPU     CPUMetrics                  `json:"cpu"`
+	Disk    DiskMetrics                 `json:"disk"`
+	Runtime RuntimeMetrics              `json:"runtime"`
+	GeoIP   *services.GeoIPMetricsSnapshot `json:"geoip,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -153,6 +162,11 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 		GCPauseCount: m.NumGC,
 		MemAlloc:     m.Alloc,
 		MemSys:       m.Sys,
+	}
+
+	if h.geoSource != nil {
+		geo := h.geoSource.GeoIPMetrics()
+		metrics.GeoIP = &geo
 	}
 
 	return metrics

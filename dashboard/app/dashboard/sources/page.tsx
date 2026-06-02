@@ -130,7 +130,11 @@ export default function SourcesPage() {
     setEnriching(true)
     try {
       const res = await api.enrichGeo()
-      toast.success(`Geo enriched ${res.enriched} proxies`)
+      toast.success(
+        res.queued > 0
+          ? `${res.queued} proxies queued for GeoIP enrichment`
+          : "No proxies waiting for GeoIP enrichment",
+      )
     } catch {
       toast.error("Geo enrichment failed")
     } finally {

@@ -52,10 +52,10 @@ Whether you're conducting web scraping operations, performing security research,
 - 🌍 **Protocol per Source**: Assign HTTP, HTTPS, SOCKS4, SOCKS4a, or SOCKS5 to each list
 
 ### GeoIP & Geo Distribution
-- 🗺️ **Automatic GeoIP**: Proxies are geolocated via [ip-api.com](http://ip-api.com) (free, no API key required)
+- 🗺️ **Automatic GeoIP**: Proxies are geolocated via [ip-api.com](http://ip-api.com) (free, no API key required; ~45 lookups/min, each IP in a batch counts)
 - 🏙️ **City-Level Data**: Country, region, city, ISP, latitude, longitude per proxy
 - 🔍 **Geo Explorer**: Expandable country tree with city drill-down in the dashboard
-- ♻️ **Auto-Enrich**: Geo data updated automatically after every source fetch
+- ♻️ **Auto-Enrich**: Geo data updated automatically after every source fetch (queued worker with rate limiting)
 
 ### Proxy Pools
 - 🗂️ **Named Pools**: Group proxies by any combination of countries, cities, ISPs, or custom tags
@@ -160,6 +160,11 @@ All settings are controlled through a single `.env` file (see `.env.example` for
 | `AUTH_IP_BLOCK_MINUTES` | `30` | How long a blocked IP cannot attempt login |
 | `AUTH_GLOBAL_MAX_PER_MINUTE` | `1000` | Max total login attempts/min across all IPs before global lockout |
 | `AUTH_GLOBAL_LOCKOUT_MINUTES` | `1` | Duration of global login lockout |
+| `GEOIP_QUERIES_PER_MINUTE` | `40` | Max ip-api.com lookups per minute (free tier allows ~45) |
+| `GEOIP_BATCH_MAX` | `100` | Max IPs per batch request |
+| `GEOIP_MAX_RETRIES` | `3` | Retries on HTTP 429 / 5xx |
+| `GEOIP_CACHE_TTL_HOURS` | `24` | How long successful lookups are cached |
+| `GEOIP_NEGATIVE_CACHE_MINUTES` | `5` | Skip re-querying IPs after a failed lookup |
 
 > **Note**: `ROTA_ADMIN_USER` and `ROTA_ADMIN_PASSWORD` are only used when the database is empty (first start). After that, use the **Settings → Admin Account** page to change credentials.
 

@@ -139,12 +139,12 @@ func (h *SourceHandler) FetchNow(w http.ResponseWriter, r *http.Request) {
 
 // EnrichGeo triggers geo enrichment for all ungeotagged proxies
 func (h *SourceHandler) EnrichGeo(w http.ResponseWriter, r *http.Request) {
-	count, err := h.sourceSvc.EnrichAll(r.Context())
+	queued, err := h.sourceSvc.EnrichAll(r.Context())
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"enriched": count})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"queued": queued})
 }
 
 // writeJSON is a helper to encode JSON responses

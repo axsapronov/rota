@@ -9,9 +9,11 @@ import {
   Zap,
   Activity,
   Server,
+  Globe,
 } from "lucide-react"
 import { formatBytes, formatNumber, getUsageColor } from "@/lib/format-utils"
 import { cn } from "@/lib/utils"
+import type { GeoIPMetrics } from "@/lib/types"
 
 interface SystemMetricsProps {
   data?: {
@@ -38,6 +40,7 @@ interface SystemMetricsProps {
       mem_alloc: number
       mem_sys: number
     }
+    geoip?: GeoIPMetrics
   }
 }
 
@@ -292,6 +295,70 @@ export function SystemMetrics({ data }: SystemMetricsProps) {
           </CardContent>
         </Card>
       </div>
+
+      {metrics.geoip && <GeoIPMetricsPanel geo={metrics.geoip} />}
     </div>
+  )
+}
+
+const GEO_QUEUE_WARN = 300
+
+function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
+  const getProgressVariant = (percentage: number) => {
+    if (percentage >= 90) return "destructive"
+    if (percentage >= 75) return "warning"
+    return "success"
+  }
+
+  const queueBar = Math.min(100, (geo.queue_pending / GEO_QUEUE_WARN) * 100)
+  const queueVariant =
+    geo.queue_pending >= GEO_QUEUE_WARN
+      ? "destructive"
+      : geo.queue_pending >= GEO_QUEUE_WARN / 2
+        ? "warning"
+        : "success"
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Globe className="h-4 w-4" />
+          GeoIP enrichment
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-sm font-medium">Queue</span>
+            <span className="text-sm font-semibold tabular-nums">
+              {formatNumber(geo.queue_pending)} in queue
+            </span>
+          </div>
+          <Progress value={queueBar} variant={queueVariant} className="h-2" />
+          <p className="text-xs text-muted-foreground">
+            {formatNumber(geo.processed_last_10m)} processed in the last 10 minutes
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-sm font-medium">Rate limit (1m)</span>
+            <span
+              className={cn(
+                "text-sm font-semibold tabular-nums",
+                getUsageColor(geo.usage_percent_1m),
+              )}
+            >
+              {geo.lookups_last_minute} / {geo.queries_per_minute}
+            </span>
+          </div>
+          <Progress
+            value={geo.usage_percent_1m}
+            variant={getProgressVariant(geo.usage_percent_1m)}
+            className="h-2"
+          />
+        </div>
+      </CardContent>
+    </Card>
   )
 }
