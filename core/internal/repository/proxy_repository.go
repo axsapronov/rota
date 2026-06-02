@@ -64,6 +64,7 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		"status":            true,
 		"requests":          true,
 		"avg_response_time": true,
+		"last_check":        true,
 		"created_at":        true,
 	}
 

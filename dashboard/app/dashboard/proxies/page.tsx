@@ -543,7 +543,17 @@ export default function ProxiesPage() {
     },
     {
       accessorKey: "avg_response_time",
-      header: "Avg Response",
+      header: ({ column }) => {
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Avg Response
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        )
+      },
       cell: ({ row }) => {
         const value = parseFloat(row.getValue("avg_response_time"))
         return <div>{value}ms</div>
@@ -551,7 +561,17 @@ export default function ProxiesPage() {
     },
     {
       accessorKey: "last_check",
-      header: "Last Check",
+      header: ({ column }) => {
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Last Check
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        )
+      },
     },
     {
       id: "actions",
