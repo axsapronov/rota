@@ -17,7 +17,7 @@ import (
 
 // HealthChecker interface for testing proxies
 type HealthChecker interface {
-	CheckProxy(ctx context.Context, proxy *models.Proxy) (*models.ProxyTestResult, error)
+	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -331,7 +331,7 @@ func (h *ProxyHandler) Test(w http.ResponseWriter, r *http.Request) {
 
 	// Perform actual proxy test
 	h.logger.Info("testing proxy", "proxy_id", id, "address", proxy.Address)
-	result, err := h.healthChecker.CheckProxy(r.Context(), proxy)
+	result, err := h.healthChecker.CheckProxy(r.Context(), proxy, true)
 	if err != nil {
 		h.logger.Error("failed to test proxy", "error", err, "proxy_id", id)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to test proxy")

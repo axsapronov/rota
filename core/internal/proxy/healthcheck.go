@@ -39,8 +39,9 @@ func NewHealthChecker(
 	}
 }
 
-// CheckProxy tests a single proxy
-func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*models.ProxyTestResult, error) {
+// CheckProxy tests a single proxy.
+// When immediate is true (manual test), proxy status in the DB is updated right away.
+func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error) {
 	startTime := time.Now()
 
 	// Load settings if not cached
@@ -64,6 +65,7 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*m
 		result.Status = "failed"
 		errMsg := fmt.Sprintf("failed to create transport: %v", err)
 		result.Error = &errMsg
+		h.persistCheckResult(ctx, proxy.ID, false, errMsg, immediate)
 		return result, nil
 	}
 
@@ -92,6 +94,7 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*m
 		result.Status = "failed"
 		errMsg := fmt.Sprintf("failed to create request: %v", err)
 		result.Error = &errMsg
+		h.persistCheckResult(ctx, proxy.ID, false, errMsg, immediate)
 		return result, nil
 	}
 
@@ -123,13 +126,7 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*m
 		}
 
 		result.Error = &errMsg
-
-		// Record health check failure
-		go func() {
-			recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			h.tracker.RecordHealthCheck(recordCtx, proxy.ID, false, duration, errMsg)
-		}()
+		h.persistCheckResult(ctx, proxy.ID, false, errMsg, immediate)
 
 		return result, nil
 	}
@@ -140,13 +137,7 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*m
 		result.Status = "failed"
 		errMsg := fmt.Sprintf("unexpected status code: got %d, expected %d", resp.StatusCode, h.settings.Status)
 		result.Error = &errMsg
-
-		// Record health check failure
-		go func() {
-			recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			h.tracker.RecordHealthCheck(recordCtx, proxy.ID, false, duration, errMsg)
-		}()
+		h.persistCheckResult(ctx, proxy.ID, false, errMsg, immediate)
 
 		return result, nil
 	}
@@ -154,15 +145,26 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy) (*m
 	// Success!
 	result.Status = "active"
 	result.ResponseTime = &duration
-
-	// Record health check success
-	go func() {
-		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		h.tracker.RecordHealthCheck(recordCtx, proxy.ID, true, duration, "")
-	}()
+	h.persistCheckResult(ctx, proxy.ID, true, "", immediate)
 
 	return result, nil
+}
+
+func (h *HealthChecker) persistCheckResult(ctx context.Context, proxyID int, success bool, errMsg string, immediate bool) {
+	var err error
+	if immediate {
+		err = h.tracker.RecordManualTestResult(ctx, proxyID, success, errMsg)
+	} else {
+		err = h.tracker.RecordHealthCheck(ctx, proxyID, success, errMsg)
+	}
+	if err != nil {
+		h.logger.Error("failed to persist proxy check result",
+			"proxy_id", proxyID,
+			"success", success,
+			"immediate", immediate,
+			"error", err,
+		)
+	}
 }
 
 // CheckAllProxies tests all proxies concurrently
@@ -219,7 +221,7 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 		idx := i
 		p := proxy
 		wp.Submit(func() {
-			result, err := h.CheckProxy(ctx, p)
+			result, err := h.CheckProxy(ctx, p, false)
 			if err != nil {
 				h.logger.Error("health check error",
 					"proxy_id", p.ID,

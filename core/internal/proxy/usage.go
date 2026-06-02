@@ -151,23 +151,19 @@ func (t *UsageTracker) UpdateProxyStatus(ctx context.Context, proxyID int, statu
 	return err
 }
 
-// RecordHealthCheck records a health check result
-func (t *UsageTracker) RecordHealthCheck(ctx context.Context, proxyID int, success bool, responseTime int, errorMsg string) error {
+// RecordManualTestResult persists the result of an explicit manual proxy test.
+// Status is set immediately (active or failed), matching pool health-check behavior.
+func (t *UsageTracker) RecordManualTestResult(ctx context.Context, proxyID int, success bool, errorMsg string) error {
 	now := time.Now()
 
-	status := "active"
-	if !success {
-		// Check how many consecutive failures
-		var failedRequests int64
-		query := `SELECT failed_requests FROM proxies WHERE id = $1`
-		if err := t.repo.GetDB().Pool.QueryRow(ctx, query, proxyID).Scan(&failedRequests); err != nil {
-			return err
-		}
+	var lastError *string
+	if !success && errorMsg != "" {
+		lastError = &errorMsg
+	}
 
-		// Mark as failed after 3 consecutive failures
-		if failedRequests >= 2 {
-			status = "failed"
-		}
+	status := "failed"
+	if success {
+		status = "active"
 	}
 
 	query := `
@@ -176,16 +172,41 @@ func (t *UsageTracker) RecordHealthCheck(ctx context.Context, proxyID int, succe
 			last_check = $1,
 			last_error = $2,
 			status = $3,
+			failed_requests = CASE WHEN $4 THEN 0 ELSE failed_requests + 1 END,
+			updated_at = NOW()
+		WHERE id = $5
+	`
+
+	_, err := t.repo.GetDB().Pool.Exec(ctx, query, now, lastError, status, success, proxyID)
+	return err
+}
+
+// RecordHealthCheck records a periodic health check result.
+// Failed checks increment failed_requests; status becomes failed after 3 consecutive failures.
+func (t *UsageTracker) RecordHealthCheck(ctx context.Context, proxyID int, success bool, errorMsg string) error {
+	now := time.Now()
+
+	var lastError *string
+	if !success && errorMsg != "" {
+		lastError = &errorMsg
+	}
+
+	query := `
+		UPDATE proxies
+		SET
+			last_check = $1,
+			last_error = CASE WHEN $2 THEN NULL ELSE $3 END,
+			failed_requests = CASE WHEN $2 THEN 0 ELSE failed_requests + 1 END,
+			status = CASE
+				WHEN $2 THEN 'active'
+				WHEN failed_requests + 1 >= 3 THEN 'failed'
+				ELSE status
+			END,
 			updated_at = NOW()
 		WHERE id = $4
 	`
 
-	var lastError *string
-	if errorMsg != "" {
-		lastError = &errorMsg
-	}
-
-	_, err := t.repo.GetDB().Pool.Exec(ctx, query, now, lastError, status, proxyID)
+	_, err := t.repo.GetDB().Pool.Exec(ctx, query, now, success, lastError, proxyID)
 	return err
 }
 
