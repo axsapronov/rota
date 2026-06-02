@@ -86,6 +86,37 @@ export interface HealthCheckMetrics {
   success_percent_1m: number
 }
 
+export type CleanupStatus = "idle" | "ok" | "error"
+
+export interface LogCleanupMetrics {
+  enabled: boolean
+  last_run_at?: string
+  last_status: CleanupStatus
+  last_duration_ms: number
+  next_run_at?: string
+  retention_days: number
+  compression_after_days: number
+  last_error?: string
+}
+
+export interface ProxyCleanupMetrics {
+  enabled: boolean
+  last_run_at?: string
+  last_status: CleanupStatus
+  last_duration_ms: number
+  next_run_at?: string
+  deleted_proxies: number
+  max_failed_days: number
+  min_success_rate: number
+  cleanup_interval_hours: number
+  last_error?: string
+}
+
+export interface CleanupMetrics {
+  log: LogCleanupMetrics
+  proxy: ProxyCleanupMetrics
+}
+
 export interface SystemMetrics {
   memory: {
     total: number
@@ -112,6 +143,7 @@ export interface SystemMetrics {
   }
   geoip?: GeoIPMetrics
   health_check?: HealthCheckMetrics
+  cleanup?: CleanupMetrics
 }
 
 export interface Settings {
@@ -151,6 +183,12 @@ export interface Settings {
     enabled: boolean
     retention_days: number
     compression_after_days: number
+    cleanup_interval_hours: number
+  }
+  proxy_cleanup: {
+    enabled: boolean
+    max_failed_days: number
+    min_success_rate: number
     cleanup_interval_hours: number
   }
 }

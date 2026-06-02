@@ -30,6 +30,7 @@ import {
   Save,
   Loader2,
   Database,
+  Trash2,
   ChevronDown,
   KeyRound,
   Eye,
@@ -238,7 +239,145 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Proxy Rotation Settings - Full Width (Most Important) */}
+      {/* 2) Authentication + Rate Limiting */}
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* Authentication Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Shield className="h-5 w-5" />
+              <CardTitle>Authentication</CardTitle>
+            </div>
+            <CardDescription>
+              Basic authentication settings for your proxy server
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="auth-enabled">Enable Authentication</Label>
+                <p className="text-xs text-muted-foreground">
+                  Require username and password for proxy connections
+                </p>
+              </div>
+              <Switch
+                id="auth-enabled"
+                checked={settings.authentication.enabled}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    authentication: { ...settings.authentication, enabled: checked },
+                  })
+                }
+              />
+            </div>
+            {settings.authentication.enabled && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="auth-username">Username</Label>
+                  <Input
+                    id="auth-username"
+                    type="text"
+                    value={settings.authentication.username}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        authentication: { ...settings.authentication, username: e.target.value },
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="auth-password">Password</Label>
+                  <Input
+                    id="auth-password"
+                    type="password"
+                    placeholder="Enter new password"
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        authentication: { ...settings.authentication, password: e.target.value },
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Leave empty to keep current password
+                  </p>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Rate Limit Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Gauge className="h-5 w-5" />
+              <CardTitle>Rate Limiting</CardTitle>
+            </div>
+            <CardDescription>
+              Control request rate limits
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="rate-limit-enabled">Enable Rate Limiting</Label>
+                <p className="text-xs text-muted-foreground">
+                  Limit number of requests per interval
+                </p>
+              </div>
+              <Switch
+                id="rate-limit-enabled"
+                checked={settings.rate_limit.enabled}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    rate_limit: { ...settings.rate_limit, enabled: checked },
+                  })
+                }
+              />
+            </div>
+
+            {settings.rate_limit.enabled && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="rate-limit-interval">Interval (seconds)</Label>
+                  <Input
+                    id="rate-limit-interval"
+                    type="number"
+                    value={settings.rate_limit.interval}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rate_limit: { ...settings.rate_limit, interval: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="rate-limit-max">Max Requests per Interval</Label>
+                  <Input
+                    id="rate-limit-max"
+                    type="number"
+                    value={settings.rate_limit.max_requests}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rate_limit: { ...settings.rate_limit, max_requests: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 3) Proxy Rotation + Proxy Cleanup */}
+      <div className="grid gap-4 md:grid-cols-2">
       <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
@@ -487,142 +626,126 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-      {/* Other Settings in 2-column grid */}
-      <div className="grid gap-4 md:grid-cols-2">
-        {/* Authentication Settings */}
+        {/* Proxy Cleanup Settings */}
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
-              <Shield className="h-5 w-5" />
-              <CardTitle>Authentication</CardTitle>
+              <Trash2 className="h-5 w-5" />
+              <CardTitle>Proxy Cleanup</CardTitle>
             </div>
             <CardDescription>
-              Basic authentication settings for your proxy server
+              Configure automatic dead proxy cleanup
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <Label htmlFor="auth-enabled">Enable Authentication</Label>
+                <Label htmlFor="proxy-cleanup-enabled">Enable Auto Cleanup</Label>
                 <p className="text-xs text-muted-foreground">
-                  Require username and password for proxy connections
+                  Automatically remove dead or low-quality proxies
                 </p>
               </div>
               <Switch
-                id="auth-enabled"
-                checked={settings.authentication.enabled}
+                id="proxy-cleanup-enabled"
+                checked={settings.proxy_cleanup?.enabled ?? false}
                 onCheckedChange={(checked) =>
                   setSettings({
                     ...settings,
-                    authentication: { ...settings.authentication, enabled: checked },
+                    proxy_cleanup: {
+                      ...(settings.proxy_cleanup || {
+                        enabled: false,
+                        max_failed_days: 7,
+                        min_success_rate: 0,
+                        cleanup_interval_hours: 24,
+                      }),
+                      enabled: checked,
+                    },
                   })
                 }
               />
             </div>
-            {settings.authentication.enabled && (
+
+            {settings.proxy_cleanup?.enabled && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="auth-username">Username</Label>
+                  <Label htmlFor="proxy-max-failed-days">Max Failed Days</Label>
                   <Input
-                    id="auth-username"
-                    type="text"
-                    value={settings.authentication.username}
+                    id="proxy-max-failed-days"
+                    type="number"
+                    min="1"
+                    value={settings.proxy_cleanup.max_failed_days ?? 7}
                     onChange={(e) =>
                       setSettings({
                         ...settings,
-                        authentication: { ...settings.authentication, username: e.target.value },
-                      })
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="auth-password">Password</Label>
-                  <Input
-                    id="auth-password"
-                    type="password"
-                    placeholder="Enter new password"
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        authentication: { ...settings.authentication, password: e.target.value },
+                        proxy_cleanup: {
+                          ...settings.proxy_cleanup,
+                          max_failed_days: parseInt(e.target.value) || 7,
+                        },
                       })
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    Leave empty to keep current password
+                    Remove proxies that have been failing longer than this period
                   </p>
                 </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
 
-        {/* Rate Limit Settings */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Gauge className="h-5 w-5" />
-              <CardTitle>Rate Limiting</CardTitle>
-            </div>
-            <CardDescription>
-              Control request rate limits
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="rate-limit-enabled">Enable Rate Limiting</Label>
-                <p className="text-xs text-muted-foreground">
-                  Limit number of requests per interval
-                </p>
-              </div>
-              <Switch
-                id="rate-limit-enabled"
-                checked={settings.rate_limit.enabled}
-                onCheckedChange={(checked) =>
-                  setSettings({
-                    ...settings,
-                    rate_limit: { ...settings.rate_limit, enabled: checked },
-                  })
-                }
-              />
-            </div>
-
-            {settings.rate_limit.enabled && (
-              <>
                 <div className="space-y-2">
-                  <Label htmlFor="rate-limit-interval">Interval (seconds)</Label>
+                  <Label htmlFor="proxy-min-success-rate">Min Success Rate (%)</Label>
                   <Input
-                    id="rate-limit-interval"
+                    id="proxy-min-success-rate"
                     type="number"
-                    value={settings.rate_limit.interval}
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={settings.proxy_cleanup.min_success_rate ?? 0}
                     onChange={(e) =>
                       setSettings({
                         ...settings,
-                        rate_limit: { ...settings.rate_limit, interval: parseInt(e.target.value) },
+                        proxy_cleanup: {
+                          ...settings.proxy_cleanup,
+                          min_success_rate: parseFloat(e.target.value) || 0,
+                        },
                       })
                     }
                   />
+                  <p className="text-xs text-muted-foreground">
+                    0 means no minimum. Remove proxies with success rate below this threshold
+                  </p>
                 </div>
+
                 <div className="space-y-2">
-                  <Label htmlFor="rate-limit-max">Max Requests per Interval</Label>
-                  <Input
-                    id="rate-limit-max"
-                    type="number"
-                    value={settings.rate_limit.max_requests}
-                    onChange={(e) =>
+                  <Label htmlFor="proxy-cleanup-interval">Cleanup Interval</Label>
+                  <Select
+                    value={(settings.proxy_cleanup.cleanup_interval_hours ?? 24).toString()}
+                    onValueChange={(value) =>
                       setSettings({
                         ...settings,
-                        rate_limit: { ...settings.rate_limit, max_requests: parseInt(e.target.value) },
+                        proxy_cleanup: {
+                          ...settings.proxy_cleanup,
+                          cleanup_interval_hours: parseInt(value),
+                        },
                       })
                     }
-                  />
+                  >
+                    <SelectTrigger id="proxy-cleanup-interval">
+                      <SelectValue placeholder="Select cleanup interval" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">Every 1 hour</SelectItem>
+                      <SelectItem value="6">Every 6 hours</SelectItem>
+                      <SelectItem value="12">Every 12 hours</SelectItem>
+                      <SelectItem value="24">Every 24 hours (Recommended)</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </>
             )}
           </CardContent>
         </Card>
+      </div>
 
+      {/* 4) Health Check + Log Retention */}
+      <div className="grid gap-4 md:grid-cols-2">
         {/* Health Check Settings */}
         <Card>
           <CardHeader>
@@ -859,6 +982,7 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+
       </div>
     </div>
   )

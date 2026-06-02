@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
@@ -35,6 +36,10 @@ func NewProxyCleanupService(
 
 // Start launches the background cleanup loop.
 func (s *ProxyCleanupService) Start(ctx context.Context) {
+	if err := s.SyncSettings(ctx); err != nil {
+		s.log.Warn("proxy cleanup: failed to sync settings on start", "error", err)
+	}
+
 	go func() {
 		ticker := time.NewTicker(s.interval)
 		defer ticker.Stop()
@@ -50,24 +55,60 @@ func (s *ProxyCleanupService) Start(ctx context.Context) {
 	s.log.Info("proxy cleanup service started")
 }
 
+// SyncSettings refreshes cleanup metrics/config from persisted settings without running deletion.
+func (s *ProxyCleanupService) SyncSettings(ctx context.Context) error {
+	cfg, err := s.loadSettings(ctx)
+	if err != nil {
+		return err
+	}
+	SetProxyCleanupConfig(cfg.Enabled, cfg.MaxFailedDays, cfg.MinSuccessRate, cfg.CleanupIntervalHours)
+	return nil
+}
+
 func (s *ProxyCleanupService) run(ctx context.Context) {
+	startedAt := time.Now()
 	cfg, err := s.loadSettings(ctx)
 	if err != nil {
 		s.log.Warn("proxy cleanup: failed to load settings", "error", err)
+		RecordProxyCleanupRun(startedAt, 0, err)
 		return
 	}
+	s.executeCleanup(ctx, cfg, startedAt)
+}
+
+// RunNow triggers proxy cleanup immediately via API/manual action.
+func (s *ProxyCleanupService) RunNow(ctx context.Context) (int, error) {
+	startedAt := time.Now()
+	cfg, err := s.loadSettings(ctx)
+	if err != nil {
+		RecordProxyCleanupRun(startedAt, 0, err)
+		return 0, err
+	}
 	if !cfg.Enabled {
-		return
+		err = fmt.Errorf("proxy cleanup is disabled in settings")
+		RecordProxyCleanupRun(startedAt, 0, err)
+		return 0, err
+	}
+	return s.executeCleanup(ctx, cfg, startedAt)
+}
+
+func (s *ProxyCleanupService) executeCleanup(ctx context.Context, cfg models.ProxyCleanupSettings, startedAt time.Time) (int, error) {
+	SetProxyCleanupConfig(cfg.Enabled, cfg.MaxFailedDays, cfg.MinSuccessRate, cfg.CleanupIntervalHours)
+	if !cfg.Enabled {
+		return 0, nil
 	}
 
 	deleted, err := s.proxyRepo.DeleteDeadProxies(ctx, cfg.MaxFailedDays, cfg.MinSuccessRate)
 	if err != nil {
 		s.log.Error("proxy cleanup: delete failed", "error", err)
-		return
+		RecordProxyCleanupRun(startedAt, 0, err)
+		return 0, err
 	}
+	RecordProxyCleanupRun(startedAt, int64(deleted), nil)
 	if deleted > 0 {
 		s.log.Info("proxy cleanup: removed dead proxies", "count", deleted)
 	}
+	return deleted, nil
 }
 
 func (s *ProxyCleanupService) loadSettings(ctx context.Context) (models.ProxyCleanupSettings, error) {

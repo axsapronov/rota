@@ -248,6 +248,12 @@ class ApiClient {
     })
   }
 
+  async runProxyCleanupNow(): Promise<{ status: string; deleted: number }> {
+    return this.request("/api/v1/proxies/cleanup/run", {
+      method: "POST",
+    })
+  }
+
   // Logs
   async getLogs(params?: {
     page?: number

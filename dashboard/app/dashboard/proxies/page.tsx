@@ -124,6 +124,7 @@ export default function ProxiesPage() {
   const [importResults, setImportResults] = React.useState<Array<{ address: string; status: string; error?: string }>>([])
   const [isDragging, setIsDragging] = React.useState(false)
   const [isReloading, setIsReloading] = React.useState(false)
+  const [isRunningCleanup, setIsRunningCleanup] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
   const [isBulkTesting, setIsBulkTesting] = React.useState(false)
@@ -491,6 +492,20 @@ export default function ProxiesPage() {
     }
   }
 
+  const handleRunProxyCleanup = async () => {
+    try {
+      setIsRunningCleanup(true)
+      const res = await api.runProxyCleanupNow()
+      toast.success("Proxy cleanup completed", `Deleted ${res.deleted} proxies`)
+      fetchProxies()
+    } catch (error) {
+      console.error("Failed to run proxy cleanup:", error)
+      toast.error("Failed to run proxy cleanup", error instanceof Error ? error.message : "Unknown error")
+    } finally {
+      setIsRunningCleanup(false)
+    }
+  }
+
   const columns: ColumnDef<Proxy>[] = [
     {
       id: "select",
@@ -783,6 +798,14 @@ export default function ProxiesPage() {
               >
                 <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
                 Reload Pool
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleRunProxyCleanup}
+                disabled={isRunningCleanup}
+              >
+                <Loader2 className={`mr-2 h-4 w-4 ${isRunningCleanup ? 'animate-spin' : ''}`} />
+                Run Cleanup
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>

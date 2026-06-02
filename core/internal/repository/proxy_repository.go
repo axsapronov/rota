@@ -294,7 +294,7 @@ func (r *ProxyRepository) DeleteDeadProxies(ctx context.Context, maxFailedDays i
 		tag, err := r.db.Pool.Exec(ctx, `
 			DELETE FROM proxies
 			WHERE status = 'failed'
-			  AND last_check < NOW() - ($1 || ' days')::INTERVAL`,
+			  AND last_check < NOW() - (INTERVAL '1 day' * $1)`,
 			maxFailedDays)
 		if err != nil {
 			return 0, fmt.Errorf("failed to delete dead proxies by age: %w", err)

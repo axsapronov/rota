@@ -45,9 +45,21 @@ func (s *LogCleanupService) Start(ctx context.Context) error {
 	}
 
 	if !settings.LogRetention.Enabled {
+		SetLogCleanupConfig(
+			false,
+			settings.LogRetention.RetentionDays,
+			settings.LogRetention.CompressionAfterDays,
+			settings.LogRetention.CleanupIntervalHours,
+		)
 		s.logger.Info("log cleanup is disabled")
 		return nil
 	}
+	SetLogCleanupConfig(
+		true,
+		settings.LogRetention.RetentionDays,
+		settings.LogRetention.CompressionAfterDays,
+		settings.LogRetention.CleanupIntervalHours,
+	)
 
 	// Set initial interval
 	interval := time.Duration(settings.LogRetention.CleanupIntervalHours) * time.Hour
@@ -96,27 +108,39 @@ func (s *LogCleanupService) worker(ctx context.Context) {
 // runCleanup performs the actual cleanup
 func (s *LogCleanupService) runCleanup(ctx context.Context) error {
 	s.logger.Info("running log cleanup")
+	startedAt := time.Now()
 
 	// Get current settings
 	settings, err := s.settingsRepo.GetAll(ctx)
 	if err != nil {
+		RecordLogCleanupRun(startedAt, err)
 		return fmt.Errorf("failed to get settings: %w", err)
 	}
+	SetLogCleanupConfig(
+		settings.LogRetention.Enabled,
+		settings.LogRetention.RetentionDays,
+		settings.LogRetention.CompressionAfterDays,
+		settings.LogRetention.CleanupIntervalHours,
+	)
 
 	if !settings.LogRetention.Enabled {
 		s.logger.Info("log cleanup is disabled, skipping")
 		return nil
 	}
 
+	var runErr error
+
 	// Update retention policy
 	if err := s.updateRetentionPolicy(ctx, settings.LogRetention); err != nil {
 		s.logger.Error("failed to update retention policy", "error", err)
+		runErr = err
 		// Don't return error, continue with other tasks
 	}
 
 	// Update compression policy
 	if err := s.updateCompressionPolicy(ctx, settings.LogRetention); err != nil {
 		s.logger.Error("failed to update compression policy", "error", err)
+		runErr = err
 		// Don't return error, continue with other tasks
 	}
 
@@ -134,6 +158,7 @@ func (s *LogCleanupService) runCleanup(ctx context.Context) error {
 		"retention_days", settings.LogRetention.RetentionDays,
 		"compression_after_days", settings.LogRetention.CompressionAfterDays,
 	)
+	RecordLogCleanupRun(startedAt, runErr)
 
 	return nil
 }
@@ -183,12 +208,24 @@ func (s *LogCleanupService) UpdateSettings(ctx context.Context) error {
 	}
 
 	if !settings.LogRetention.Enabled {
+		SetLogCleanupConfig(
+			false,
+			settings.LogRetention.RetentionDays,
+			settings.LogRetention.CompressionAfterDays,
+			settings.LogRetention.CleanupIntervalHours,
+		)
 		s.logger.Info("log cleanup disabled")
 		if s.ticker != nil {
 			s.ticker.Stop()
 		}
 		return nil
 	}
+	SetLogCleanupConfig(
+		true,
+		settings.LogRetention.RetentionDays,
+		settings.LogRetention.CompressionAfterDays,
+		settings.LogRetention.CleanupIntervalHours,
+	)
 
 	// Restart ticker with new interval
 	if s.ticker != nil {

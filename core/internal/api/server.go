@@ -42,6 +42,7 @@ type Server struct {
 
 	// Proxy server reference for reloading
 	proxyServer ProxyServer
+	cleanupSvc  *services.ProxyCleanupService
 
 	// Handlers
 	authHandler          *handlers.AuthHandler
@@ -150,11 +151,17 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 				log.Info("proxy settings reloaded after update")
 			}
 		}
+		if s.cleanupSvc != nil {
+			if err := s.cleanupSvc.SyncSettings(ctx); err != nil {
+				log.Error("failed to sync proxy cleanup settings after update", "error", err)
+			}
+		}
 	})
 
 	// Alert watcher + proxy cleanup services
 	alertWatcher := services.NewAlertWatcher(poolRepo, log)
 	cleanupSvc := services.NewProxyCleanupService(proxyRepo, settingsRepo, log)
+	s.cleanupSvc = cleanupSvc
 
 	// Start background services
 	sourceSvc.Start(context.Background())
@@ -252,6 +259,7 @@ func (s *Server) setupRoutes() {
 		r.Delete("/proxies/{id}", s.proxyHandler.Delete)
 		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
+		r.Post("/proxies/cleanup/run", s.RunProxyCleanupNow)
 
 		// System logs
 		r.Get("/logs", s.logsHandler.List)
@@ -331,6 +339,7 @@ func (s *Server) SetProxyServer(ps ProxyServer) {
 }
 
 // ReloadProxyPool reloads the proxy pool from database
+//
 //	@Summary		Reload proxy pool
 //	@Description	Reload proxy pool from database
 //	@Tags			proxies
@@ -360,6 +369,33 @@ func (s *Server) ReloadProxyPool(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success","message":"Proxy pool reloaded successfully"}`))
+}
+
+// RunProxyCleanupNow triggers proxy cleanup immediately.
+//
+//	@Summary		Run proxy cleanup now
+//	@Description	Force immediate proxy cleanup using current proxy_cleanup settings
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		200	{object}	map[string]interface{}	"Run confirmation"
+//	@Failure		400	{object}	models.ErrorResponse
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/cleanup/run [post]
+func (s *Server) RunProxyCleanupNow(w http.ResponseWriter, r *http.Request) {
+	if s.cleanupSvc == nil {
+		http.Error(w, "proxy cleanup service not available", http.StatusInternalServerError)
+		return
+	}
+
+	deleted, err := s.cleanupSvc.RunNow(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf(`{"status":"success","deleted":%d}`, deleted)))
 }
 
 // serveSwaggerJSON serves the swagger.json file

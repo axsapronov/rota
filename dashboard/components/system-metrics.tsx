@@ -11,10 +11,11 @@ import {
   Server,
   Globe,
   HeartPulse,
+  Trash2,
 } from "lucide-react"
 import { formatBytes, formatNumber, getUsageColor } from "@/lib/format-utils"
 import { cn } from "@/lib/utils"
-import type { GeoIPMetrics, HealthCheckMetrics } from "@/lib/types"
+import type { CleanupMetrics, GeoIPMetrics, HealthCheckMetrics } from "@/lib/types"
 
 interface SystemMetricsProps {
   data?: {
@@ -43,6 +44,7 @@ interface SystemMetricsProps {
     }
     geoip?: GeoIPMetrics
     health_check?: HealthCheckMetrics
+    cleanup?: CleanupMetrics
   }
 }
 
@@ -298,12 +300,13 @@ export function SystemMetrics({ data }: SystemMetricsProps) {
         </Card>
       </div>
 
-      {(metrics.geoip || metrics.health_check) && (
-        <div className="grid gap-4 md:grid-cols-2">
+      {(metrics.geoip || metrics.health_check || metrics.cleanup) && (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {metrics.geoip && <GeoIPMetricsPanel geo={metrics.geoip} />}
           {metrics.health_check && (
             <HealthCheckMetricsPanel hc={metrics.health_check} />
           )}
+          {metrics.cleanup && <ProxyCleanupMetricsPanel cleanup={metrics.cleanup} />}
         </div>
       )}
     </div>
@@ -422,6 +425,40 @@ function HealthCheckMetricsPanel({ hc }: { hc: HealthCheckMetrics }) {
             variant={getProgressVariant(hc.success_percent_1m)}
             className="h-2"
           />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function ProxyCleanupMetricsPanel({ cleanup }: { cleanup: CleanupMetrics }) {
+  const formatDateTime = (value?: string) => {
+    if (!value) return "—"
+    const dt = new Date(value)
+    if (Number.isNaN(dt.getTime())) return "—"
+    return dt.toLocaleString()
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Trash2 className="h-4 w-4" />
+          Proxy cleanup
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-1">
+          <p className="text-sm text-muted-foreground">Last run</p>
+          <p className="text-sm font-medium">{formatDateTime(cleanup.proxy.last_run_at)}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-sm text-muted-foreground">Deleted</p>
+          <p className="text-sm font-medium">{formatNumber(cleanup.proxy.deleted_proxies)}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-sm text-muted-foreground">Next run</p>
+          <p className="text-sm font-medium">{formatDateTime(cleanup.proxy.next_run_at)}</p>
         </div>
       </CardContent>
     </Card>
