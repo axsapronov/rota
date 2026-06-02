@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/google/uuid"
 )
@@ -104,6 +105,33 @@ func (s *HCJobStore) cleanup() {
 			delete(s.jobs, id)
 		}
 	}
+}
+
+// QueuePending returns proxies not yet checked across pending and running jobs.
+func (s *HCJobStore) QueuePending() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	total := 0
+	for _, j := range s.jobs {
+		switch j.Status {
+		case HCJobPending:
+			total += j.Total
+		case HCJobRunning:
+			remaining := j.Total - j.Progress
+			if remaining > 0 {
+				total += remaining
+			}
+		}
+	}
+	return total
+}
+
+// HealthCheckMetricsSnapshot is the API shape for proxy health-check stats.
+type HealthCheckMetricsSnapshot = checkstats.Snapshot
+
+// HealthCheckMetrics returns proxy health-check queue and throughput stats.
+func HealthCheckMetrics() HealthCheckMetricsSnapshot {
+	return checkstats.BuildSnapshot(GetJobStore().QueuePending())
 }
 
 // ListByPool returns all jobs for a given pool (newest first)

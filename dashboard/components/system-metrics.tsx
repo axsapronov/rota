@@ -10,10 +10,11 @@ import {
   Activity,
   Server,
   Globe,
+  HeartPulse,
 } from "lucide-react"
 import { formatBytes, formatNumber, getUsageColor } from "@/lib/format-utils"
 import { cn } from "@/lib/utils"
-import type { GeoIPMetrics } from "@/lib/types"
+import type { GeoIPMetrics, HealthCheckMetrics } from "@/lib/types"
 
 interface SystemMetricsProps {
   data?: {
@@ -41,6 +42,7 @@ interface SystemMetricsProps {
       mem_sys: number
     }
     geoip?: GeoIPMetrics
+    health_check?: HealthCheckMetrics
   }
 }
 
@@ -296,12 +298,19 @@ export function SystemMetrics({ data }: SystemMetricsProps) {
         </Card>
       </div>
 
-      {metrics.geoip && <GeoIPMetricsPanel geo={metrics.geoip} />}
+      {(metrics.geoip || metrics.health_check) && (
+        <div className="grid gap-4 md:grid-cols-2">
+          {metrics.geoip && <GeoIPMetricsPanel geo={metrics.geoip} />}
+          {metrics.health_check && (
+            <HealthCheckMetricsPanel hc={metrics.health_check} />
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-const GEO_QUEUE_WARN = 300
+const QUEUE_WARN = 300
 
 function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
   const getProgressVariant = (percentage: number) => {
@@ -310,11 +319,11 @@ function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
     return "success"
   }
 
-  const queueBar = Math.min(100, (geo.queue_pending / GEO_QUEUE_WARN) * 100)
+  const queueBar = Math.min(100, (geo.queue_pending / QUEUE_WARN) * 100)
   const queueVariant =
-    geo.queue_pending >= GEO_QUEUE_WARN
+    geo.queue_pending >= QUEUE_WARN
       ? "destructive"
-      : geo.queue_pending >= GEO_QUEUE_WARN / 2
+      : geo.queue_pending >= QUEUE_WARN / 2
         ? "warning"
         : "success"
 
@@ -355,6 +364,66 @@ function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
           <Progress
             value={geo.usage_percent_1m}
             variant={getProgressVariant(geo.usage_percent_1m)}
+            className="h-2"
+          />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function HealthCheckMetricsPanel({ hc }: { hc: HealthCheckMetrics }) {
+  const getProgressVariant = (percentage: number) => {
+    if (percentage < 50) return "destructive"
+    if (percentage < 80) return "warning"
+    return "success"
+  }
+
+  const queueBar = Math.min(100, (hc.queue_pending / QUEUE_WARN) * 100)
+  const queueVariant =
+    hc.queue_pending >= QUEUE_WARN
+      ? "destructive"
+      : hc.queue_pending >= QUEUE_WARN / 2
+        ? "warning"
+        : "success"
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <HeartPulse className="h-4 w-4" />
+          Proxy health checks
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-sm font-medium">Queue</span>
+            <span className="text-sm font-semibold tabular-nums">
+              {formatNumber(hc.queue_pending)} in queue
+            </span>
+          </div>
+          <Progress value={queueBar} variant={queueVariant} className="h-2" />
+          <p className="text-xs text-muted-foreground">
+            {formatNumber(hc.processed_last_10m)} checked in the last 10 minutes
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-sm font-medium">Success rate (1m)</span>
+            <span
+              className={cn(
+                "text-sm font-semibold tabular-nums",
+                getUsageColor(100 - hc.success_percent_1m),
+              )}
+            >
+              {hc.success_percent_1m.toFixed(0)}% · {formatNumber(hc.checks_last_minute)} checks
+            </span>
+          </div>
+          <Progress
+            value={hc.success_percent_1m}
+            variant={getProgressVariant(hc.success_percent_1m)}
             className="h-2"
           />
         </div>

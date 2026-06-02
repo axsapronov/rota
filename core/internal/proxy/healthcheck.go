@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
@@ -165,6 +166,7 @@ func (h *HealthChecker) persistCheckResult(ctx context.Context, proxyID int, suc
 			"error", err,
 		)
 	}
+	checkstats.Record(success)
 }
 
 // CheckAllProxies tests all proxies concurrently

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
@@ -276,6 +277,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		msg := err.Error()
 		result.Error = &msg
 		ps.updateProxyStatus(ctx, p.ID, "failed")
+		checkstats.Record(false)
 		return result
 	}
 
@@ -296,6 +298,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		msg := err.Error()
 		result.Error = &msg
 		ps.updateProxyStatus(ctx, p.ID, "failed")
+		checkstats.Record(false)
 		return result
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Rota/1.0)")
@@ -307,6 +310,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		msg := err.Error()
 		result.Error = &msg
 		ps.updateProxyStatus(ctx, p.ID, "failed")
+		checkstats.Record(false)
 		return result
 	}
 	defer resp.Body.Close()
@@ -315,11 +319,13 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		result.Status = "active"
 		result.ResponseTime = &dur
 		ps.updateProxyStatus(ctx, p.ID, "active")
+		checkstats.Record(true)
 	} else {
 		result.Status = "failed"
 		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
 		result.Error = &msg
 		ps.updateProxyStatus(ctx, p.ID, "failed")
+		checkstats.Record(false)
 	}
 	return result
 }

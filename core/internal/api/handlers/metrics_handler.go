@@ -38,7 +38,8 @@ type SystemMetrics struct {
 	CPU     CPUMetrics                  `json:"cpu"`
 	Disk    DiskMetrics                 `json:"disk"`
 	Runtime RuntimeMetrics              `json:"runtime"`
-	GeoIP   *services.GeoIPMetricsSnapshot `json:"geoip,omitempty"`
+	GeoIP       *services.GeoIPMetricsSnapshot `json:"geoip,omitempty"`
+	HealthCheck *services.HealthCheckMetricsSnapshot `json:"health_check,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -168,6 +169,9 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 		geo := h.geoSource.GeoIPMetrics()
 		metrics.GeoIP = &geo
 	}
+
+	hc := services.HealthCheckMetrics()
+	metrics.HealthCheck = &hc
 
 	return metrics
 }

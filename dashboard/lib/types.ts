@@ -73,6 +73,13 @@ export interface GeoIPMetrics {
   usage_percent_1m: number
 }
 
+export interface HealthCheckMetrics {
+  queue_pending: number
+  processed_last_10m: number
+  checks_last_minute: number
+  success_percent_1m: number
+}
+
 export interface SystemMetrics {
   memory: {
     total: number
@@ -98,6 +105,7 @@ export interface SystemMetrics {
     mem_sys: number
   }
   geoip?: GeoIPMetrics
+  health_check?: HealthCheckMetrics
 }
 
 export interface Settings {
