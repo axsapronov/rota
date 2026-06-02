@@ -21,6 +21,7 @@ import {
   Download,
   Trash2,
   Loader2,
+  Play,
   Upload,
   FileText,
   CheckCircle2,
@@ -118,6 +119,7 @@ export default function ProxiesPage() {
   const [isReloading, setIsReloading] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
+  const [isBulkTesting, setIsBulkTesting] = React.useState(false)
    const [deleteAllConfirm, setDeleteAllConfirm] = React.useState(false)
 
   // Debounce search query
@@ -233,14 +235,68 @@ export default function ProxiesPage() {
     }
   }
 
+  const getSelectedProxyIds = () =>
+    Object.keys(rowSelection).map((key) => data[Number(key)].id)
+
+  const handleBulkTest = async () => {
+    const selectedIds = getSelectedProxyIds()
+    if (selectedIds.length === 0) return
+
+    setIsBulkTesting(true)
+    let passed = 0
+    let failed = 0
+
+    try {
+      const results = await Promise.allSettled(
+        selectedIds.map((id) => api.testProxy(id))
+      )
+
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value.status === "active") {
+          passed++
+        } else {
+          failed++
+        }
+      }
+
+      const total = selectedIds.length
+      if (failed === 0) {
+        toast.success(
+          "Bulk test completed",
+          `${passed} of ${total} proxies passed`
+        )
+      } else if (passed === 0) {
+        toast.error(
+          "Bulk test completed",
+          `All ${total} proxies failed`
+        )
+      } else {
+        toast.success(
+          "Bulk test completed",
+          `${passed} passed, ${failed} failed (${total} total)`
+        )
+      }
+
+      fetchProxies()
+    } catch (error) {
+      console.error("Failed to bulk test proxies:", error)
+      toast.error(
+        "Failed to bulk test proxies",
+        error instanceof Error ? error.message : "Unknown error"
+      )
+    } finally {
+      setIsBulkTesting(false)
+    }
+  }
+
   const handleBulkDelete = async () => {
-    const selectedIds = Object.keys(rowSelection).map(key => data[Number(key)].id)
+    const selectedIds = getSelectedProxyIds()
     if (selectedIds.length === 0) return
     setBulkDeleteConfirm(true)
   }
 
   const confirmBulkDelete = async () => {
-    const selectedIds = Object.keys(rowSelection).map(key => data[Number(key)].id)
+    const selectedIds = getSelectedProxyIds()
 
     try {
       await api.bulkDeleteProxies({ ids: selectedIds })
@@ -704,6 +760,17 @@ export default function ProxiesPage() {
                     Export as CSV
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={handleBulkTest}
+                    disabled={Object.keys(rowSelection).length === 0 || isBulkTesting}
+                  >
+                    {isBulkTesting ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="mr-2 h-4 w-4" />
+                    )}
+                    Test selected ({Object.keys(rowSelection).length})
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     className="text-red-600"
                     onClick={handleBulkDelete}
