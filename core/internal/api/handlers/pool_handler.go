@@ -304,10 +304,10 @@ func (h *PoolHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"job_id":   job.ID,
-		"pool_id":  id,
-		"total":    job.Total,
-		"status":   job.Status,
+		"job_id":  job.ID,
+		"pool_id": id,
+		"total":   job.Total,
+		"status":  job.Status,
 	})
 }
 
@@ -316,7 +316,7 @@ func (h *PoolHandler) HealthCheckStatus(w http.ResponseWriter, r *http.Request) 
 	jobID := chi.URLParam(r, "job_id")
 	store := services.GetJobStore()
 	job, ok := store.Get(jobID)
-	if !ok {
+	if !ok || job.Kind != services.HCJobKindPool {
 		http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
 		return
 	}

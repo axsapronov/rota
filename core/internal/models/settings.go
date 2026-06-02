@@ -4,12 +4,13 @@ import "time"
 
 // Settings represents system configuration
 type Settings struct {
-	Authentication AuthenticationSettings `json:"authentication"`
-	Rotation       RotationSettings       `json:"rotation"`
-	RateLimit      RateLimitSettings      `json:"rate_limit"`
-	HealthCheck    HealthCheckSettings    `json:"healthcheck"`
-	LogRetention   LogRetentionSettings   `json:"log_retention"`
-	ProxyCleanup   ProxyCleanupSettings   `json:"proxy_cleanup"`
+	Authentication    AuthenticationSettings    `json:"authentication"`
+	Rotation          RotationSettings          `json:"rotation"`
+	RateLimit         RateLimitSettings         `json:"rate_limit"`
+	HealthCheck       HealthCheckSettings       `json:"healthcheck"`
+	GlobalHealthCheck GlobalHealthCheckSettings `json:"global_health_check"`
+	LogRetention      LogRetentionSettings      `json:"log_retention"`
+	ProxyCleanup      ProxyCleanupSettings      `json:"proxy_cleanup"`
 }
 
 // AuthenticationSettings represents proxy server authentication configuration
@@ -55,6 +56,12 @@ type HealthCheckSettings struct {
 	URL     string   `json:"url"`
 	Status  int      `json:"status"`
 	Headers []string `json:"headers"`
+}
+
+// GlobalHealthCheckSettings represents orphan global health check scheduler configuration.
+type GlobalHealthCheckSettings struct {
+	Enabled         bool `json:"enabled"`
+	IntervalMinutes int  `json:"interval_minutes"`
 }
 
 // LogRetentionSettings represents log retention and cleanup configuration

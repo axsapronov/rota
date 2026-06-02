@@ -34,13 +34,14 @@ func NewMetricsHandler(log *logger.Logger, geoSource geoMetricsProvider) *Metric
 
 // SystemMetrics represents system resource metrics
 type SystemMetrics struct {
-	Memory      MemoryMetrics                        `json:"memory"`
-	CPU         CPUMetrics                           `json:"cpu"`
-	Disk        DiskMetrics                          `json:"disk"`
-	Runtime     RuntimeMetrics                       `json:"runtime"`
-	GeoIP       *services.GeoIPMetricsSnapshot       `json:"geoip,omitempty"`
-	HealthCheck *services.HealthCheckMetricsSnapshot `json:"health_check,omitempty"`
-	Cleanup     *services.CleanupMetricsSnapshot     `json:"cleanup,omitempty"`
+	Memory            MemoryMetrics                              `json:"memory"`
+	CPU               CPUMetrics                                 `json:"cpu"`
+	Disk              DiskMetrics                                `json:"disk"`
+	Runtime           RuntimeMetrics                             `json:"runtime"`
+	GeoIP             *services.GeoIPMetricsSnapshot             `json:"geoip,omitempty"`
+	HealthCheck       *services.HealthCheckMetricsSnapshot       `json:"health_check,omitempty"`
+	GlobalHealthCheck *services.GlobalHealthCheckMetricsSnapshot `json:"global_health_check,omitempty"`
+	Cleanup           *services.CleanupMetricsSnapshot           `json:"cleanup,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -174,6 +175,9 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 
 	hc := services.HealthCheckMetrics()
 	metrics.HealthCheck = &hc
+
+	globalHC := services.GlobalHealthCheckMetrics()
+	metrics.GlobalHealthCheck = &globalHC
 
 	cleanup := services.CleanupMetrics()
 	metrics.Cleanup = &cleanup

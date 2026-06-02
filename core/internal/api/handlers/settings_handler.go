@@ -34,6 +34,7 @@ func (h *SettingsHandler) SetOnUpdate(fn func(ctx context.Context)) {
 }
 
 // Get handles getting current configuration
+//
 //	@Summary		Get settings
 //	@Description	Get current system configuration
 //	@Tags			settings
@@ -51,11 +52,15 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	// Never expose proxy authentication password in response
 	settings.Authentication.Password = ""
+	if settings.GlobalHealthCheck.IntervalMinutes <= 0 {
+		settings.GlobalHealthCheck.IntervalMinutes = 30
+	}
 
 	h.jsonResponse(w, http.StatusOK, settings)
 }
 
 // Update handles updating configuration
+//
 //	@Summary		Update settings
 //	@Description	Update system configuration
 //	@Tags			settings
@@ -69,6 +74,10 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var settings models.Settings
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		if settings.GlobalHealthCheck.IntervalMinutes <= 0 {
+			settings.GlobalHealthCheck.IntervalMinutes = 30
+		}
+
 		h.errorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -115,6 +124,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // Reset handles resetting configuration to defaults
+//
 //	@Summary		Reset settings
 //	@Description	Reset configuration to default values
 //	@Tags			settings
@@ -164,6 +174,11 @@ func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 	// Validate healthcheck workers
 	if s.HealthCheck.Workers < 1 || s.HealthCheck.Workers > 100 {
 		return fmt.Errorf("healthcheck.workers must be between 1 and 100")
+	}
+
+	// Validate global healthcheck interval
+	if s.GlobalHealthCheck.IntervalMinutes < 1 || s.GlobalHealthCheck.IntervalMinutes > 1440 {
+		return fmt.Errorf("global_health_check.interval_minutes must be between 1 and 1440")
 	}
 
 	return nil

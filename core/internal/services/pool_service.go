@@ -23,10 +23,10 @@ type PoolService struct {
 	logger    *logger.Logger
 
 	// per-pool rotation state (roundrobin index, stick counters)
-	mu          sync.Mutex
-	rrIndex     map[int]int   // pool_id -> current roundrobin index
-	stickCur    map[int]int   // pool_id -> current proxy index in stick mode
-	stickCount  map[int]int   // pool_id -> requests served on current proxy
+	mu         sync.Mutex
+	rrIndex    map[int]int // pool_id -> current roundrobin index
+	stickCur   map[int]int // pool_id -> current proxy index in stick mode
+	stickCount map[int]int // pool_id -> requests served on current proxy
 }
 
 // NewPoolService creates a new PoolService
@@ -75,7 +75,7 @@ func (ps *PoolService) runScheduledHealthChecks(ctx context.Context) {
 		if isCronDue(pool.HealthCheckCron) {
 			poolCopy := pool
 			go func(p models.ProxyPool) {
-				if _, err := ps.HealthCheckPool(ctx, p.ID, p.HealthCheckURL, 20); err != nil {
+				if _, err := RunPoolHealthCheckAsync(ctx, ps, p.ID, p.Name, p.HealthCheckURL, 20); err != nil {
 					ps.logger.Error("scheduled pool health check failed", "pool_id", p.ID, "error", err)
 				}
 			}(poolCopy)
@@ -104,15 +104,11 @@ func (ps *PoolService) runAutoSync(ctx context.Context) {
 			if len(newIDs) > 0 {
 				ps.logger.Info("auto-sync added new proxies to pool",
 					"pool_id", poolCopy.ID, "added", len(newIDs), "total", total)
-				newCopy := append([]int(nil), newIDs...)
-				go func(p models.ProxyPool, ids []int) {
-					hcCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-					defer cancel()
-					if err := ps.checkProxiesByIDs(hcCtx, p.HealthCheckURL, ids, 20); err != nil {
-						ps.logger.Warn("auto-HC on new pool members failed",
-							"pool_id", p.ID, "error", err)
+				go func(p models.ProxyPool) {
+					if _, err := RunPoolHealthCheckAsync(ctx, ps, p.ID, p.Name, p.HealthCheckURL, 20); err != nil {
+						ps.logger.Warn("auto-HC on new pool members failed", "pool_id", p.ID, "error", err)
 					}
-				}(poolCopy, newCopy)
+				}(poolCopy)
 			}
 		}
 	}
@@ -134,15 +130,11 @@ func (ps *PoolService) SyncPool(ctx context.Context, poolID int) (int, error) {
 	if len(newIDs) > 0 {
 		ps.logger.Info("manual sync added new proxies to pool",
 			"pool_id", poolID, "added", len(newIDs), "total", total)
-		newCopy := append([]int(nil), newIDs...)
-		go func(p models.ProxyPool, ids []int) {
-			hcCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			if err := ps.checkProxiesByIDs(hcCtx, p.HealthCheckURL, ids, 20); err != nil {
-				ps.logger.Warn("auto-HC on new pool members failed (manual sync)",
-					"pool_id", p.ID, "error", err)
+		go func(p models.ProxyPool) {
+			if _, err := RunPoolHealthCheckAsync(context.Background(), ps, p.ID, p.Name, p.HealthCheckURL, 20); err != nil {
+				ps.logger.Warn("auto-HC on new pool members failed (manual sync)", "pool_id", p.ID, "error", err)
 			}
-		}(*pool, newCopy)
+		}(*pool)
 	}
 	return total, nil
 }

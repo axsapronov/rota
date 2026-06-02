@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 )
@@ -18,6 +19,7 @@ import (
 // HealthChecker interface for testing proxies
 type HealthChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
+	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -37,6 +39,7 @@ func NewProxyHandler(proxyRepo *repository.ProxyRepository, healthChecker Health
 }
 
 // List handles proxy listing with pagination and filters
+//
 //	@Summary		List proxies
 //	@Description	Get paginated list of proxies with optional filters
 //	@Tags			proxies
@@ -96,6 +99,7 @@ func (h *ProxyHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // Create handles proxy creation
+//
 //	@Summary		Create proxy
 //	@Description	Create a new proxy server
 //	@Tags			proxies
@@ -134,6 +138,7 @@ func (h *ProxyHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // BulkCreate handles bulk proxy creation
+//
 //	@Summary		Bulk create proxies
 //	@Description	Create multiple proxy servers at once
 //	@Tags			proxies
@@ -188,6 +193,7 @@ func (h *ProxyHandler) BulkCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // Update handles proxy update
+//
 //	@Summary		Update proxy
 //	@Description	Update an existing proxy server
 //	@Tags			proxies
@@ -230,6 +236,7 @@ func (h *ProxyHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete handles proxy deletion
+//
 //	@Summary		Delete proxy
 //	@Description	Delete a proxy server by ID
 //	@Tags			proxies
@@ -256,6 +263,7 @@ func (h *ProxyHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // BulkDelete handles bulk proxy deletion
+//
 //	@Summary		Bulk delete proxies
 //	@Description	Delete multiple proxy servers at once
 //	@Tags			proxies
@@ -300,6 +308,7 @@ func (h *ProxyHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // Test handles proxy testing
+//
 //	@Summary		Test proxy
 //	@Description	Test a proxy server's connectivity and performance
 //	@Tags			proxies
@@ -331,25 +340,71 @@ func (h *ProxyHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Perform actual proxy test
-	h.logger.Info("testing proxy", "proxy_id", id, "address", proxy.Address)
-	result, err := h.healthChecker.CheckProxy(r.Context(), proxy, true)
+	// Enqueue async proxy test.
+	h.logger.Info("enqueuing proxy test", "proxy_id", id, "address", proxy.Address)
+	job, err := services.RunProxyHealthCheckAsync(r.Context(), h.proxyRepo, h.healthChecker, []int{id}, 1)
 	if err != nil {
-		h.logger.Error("failed to test proxy", "error", err, "proxy_id", id)
+		h.logger.Error("failed to enqueue proxy test", "error", err, "proxy_id", id)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to test proxy")
 		return
 	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id":   job.ID,
+		"status":   job.Status,
+		"total":    job.Total,
+		"proxy_id": id,
+	})
+}
 
-	h.logger.Info("proxy test completed",
-		"proxy_id", id,
-		"status", result.Status,
-		"response_time", result.ResponseTime,
-	)
+// TestBulk enqueues tests for a set of proxies.
+func (h *ProxyHandler) TestBulk(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ProxyIDs []int `json:"proxy_ids"`
+		Workers  int   `json:"workers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.ProxyIDs) == 0 {
+		h.errorResponse(w, http.StatusBadRequest, "proxy_ids are required")
+		return
+	}
+	job, err := services.RunProxyHealthCheckAsync(r.Context(), h.proxyRepo, h.healthChecker, body.ProxyIDs, body.Workers)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to enqueue proxy tests")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
 
-	h.jsonResponse(w, http.StatusOK, result)
+// TestGlobal enqueues global (orphan) health check job.
+func (h *ProxyHandler) TestGlobal(w http.ResponseWriter, r *http.Request) {
+	job, err := services.RunOrphanHealthCheckAsync(r.Context(), h.healthChecker)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to enqueue global health check")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
+// TestJobStatus returns status for a proxy test job.
+func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "job_id")
+	job, ok := services.GetJobStore().Get(jobID)
+	if !ok || (job.Kind != services.HCJobKindProxy && job.Kind != services.HCJobKindOrphan) {
+		h.errorResponse(w, http.StatusNotFound, "Job not found")
+		return
+	}
+	h.jsonResponse(w, http.StatusOK, job)
 }
 
 // Export handles proxy export
+//
 //	@Summary		Export proxies
 //	@Description	Export proxy list in various formats (txt, json, csv)
 //	@Tags			proxies

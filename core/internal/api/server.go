@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/proxy"
@@ -96,6 +99,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// putting dead proxies back into rotation. Pool-level health checks (cron-
 	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
+	services.GetJobStore().Start(context.Background(), proxyRepo, poolSvc, healthChecker)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
@@ -142,6 +146,77 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		userHandler:          userHandler,
 	}
 
+	var globalHCMu sync.Mutex
+	var globalHCCancel context.CancelFunc
+	applyGlobalHealthCheckSettings := func(enabled bool, intervalMinutes int) {
+		if intervalMinutes <= 0 {
+			intervalMinutes = 30
+		}
+		interval := time.Duration(intervalMinutes) * time.Minute
+
+		globalHCMu.Lock()
+		defer globalHCMu.Unlock()
+
+		if globalHCCancel != nil {
+			globalHCCancel()
+			globalHCCancel = nil
+		}
+
+		if !enabled {
+			services.SetGlobalHealthCheckConfig(false, 0)
+			log.Info("orphan periodic health check disabled")
+			return
+		}
+
+		services.SetGlobalHealthCheckConfig(true, interval)
+		runCtx, cancel := context.WithCancel(context.Background())
+		globalHCCancel = cancel
+
+		go func(ctx context.Context, runInterval time.Duration) {
+			ticker := time.NewTicker(runInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					startedAt := time.Now()
+					checkstats.RecordGlobalHealthCheckStart(startedAt)
+					job, err := services.RunOrphanHealthCheckAsync(context.Background(), healthChecker)
+					if err != nil {
+						checkstats.RecordGlobalHealthCheckFinish(startedAt, 0, err, runInterval)
+						continue
+					}
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(500 * time.Millisecond):
+							statusJob, ok := services.GetJobStore().Get(job.ID)
+							if !ok {
+								break
+							}
+							if statusJob.Status == services.HCJobDone {
+								checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, nil, runInterval)
+								break
+							}
+							if statusJob.Status == services.HCJobFailed {
+								checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, errors.New(statusJob.Error), runInterval)
+								break
+							}
+						}
+						statusJob, ok := services.GetJobStore().Get(job.ID)
+						if !ok || statusJob.Status == services.HCJobDone || statusJob.Status == services.HCJobFailed {
+							break
+						}
+					}
+				}
+			}
+		}(runCtx, interval)
+
+		log.Info("orphan periodic health check enabled", "interval_minutes", intervalMinutes)
+	}
+
 	// Wire settings reload: when settings are updated via API, reload proxy server
 	settingsHandler.SetOnUpdate(func(ctx context.Context) {
 		if s.proxyServer != nil {
@@ -156,6 +231,11 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 				log.Error("failed to sync proxy cleanup settings after update", "error", err)
 			}
 		}
+		if cfg, err := settingsRepo.GetAll(ctx); err != nil {
+			log.Error("failed to reload global healthcheck settings after update", "error", err)
+		} else {
+			applyGlobalHealthCheckSettings(cfg.GlobalHealthCheck.Enabled, cfg.GlobalHealthCheck.IntervalMinutes)
+		}
 	})
 
 	// Alert watcher + proxy cleanup services
@@ -168,12 +248,16 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	poolSvc.Start(context.Background())
 	alertWatcher.Start(context.Background())
 
-	// Periodic health checks are limited to orphan proxies only (proxies that do
-	// not belong to any pool), so pool-level health checks remain authoritative.
-	if isHealthCheckEnabled() {
-		intervalMinutes := healthCheckIntervalMinutes()
-		go healthChecker.StartPeriodicHealthCheck(context.Background(), time.Duration(intervalMinutes)*time.Minute)
-		log.Info("orphan periodic health check enabled", "interval_minutes", intervalMinutes)
+	// Global periodic healthcheck is driven by persisted settings.
+	startCfg, err := settingsRepo.GetAll(context.Background())
+	if err != nil {
+		log.Error("failed to load settings for global healthcheck startup", "error", err)
+		// Fall back to env only if settings cannot be loaded.
+		enabled := isHealthCheckEnabled()
+		interval := healthCheckIntervalMinutes()
+		applyGlobalHealthCheckSettings(enabled, interval)
+	} else {
+		applyGlobalHealthCheckSettings(startCfg.GlobalHealthCheck.Enabled, startCfg.GlobalHealthCheck.IntervalMinutes)
 	}
 
 	cleanupSvc.Start(context.Background())
@@ -258,6 +342,9 @@ func (s *Server) setupRoutes() {
 		r.Put("/proxies/{id}", s.proxyHandler.Update)
 		r.Delete("/proxies/{id}", s.proxyHandler.Delete)
 		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
+		r.Post("/proxies/test/bulk", s.proxyHandler.TestBulk)
+		r.Post("/proxies/test/global", s.proxyHandler.TestGlobal)
+		r.Get("/proxies/test/{job_id}", s.proxyHandler.TestJobStatus)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
 		r.Post("/proxies/cleanup/run", s.RunProxyCleanupNow)
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/checkstats"
@@ -171,6 +172,32 @@ func (h *HealthChecker) persistCheckResult(ctx context.Context, proxyID int, suc
 
 // CheckAllProxies tests orphan proxies (not attached to any pool) concurrently.
 func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error) {
+	return h.CheckAllProxiesWithProgress(ctx, nil)
+}
+
+// CountOrphanProxies returns amount of proxies not attached to any pool.
+func (h *HealthChecker) CountOrphanProxies(ctx context.Context) (int, error) {
+	query := `
+		SELECT COUNT(*)
+		FROM proxies p
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM pool_proxies ppm
+			WHERE ppm.proxy_id = p.id
+		)
+	`
+	var total int
+	if err := h.proxyRepo.GetDB().Pool.QueryRow(ctx, query).Scan(&total); err != nil {
+		return 0, fmt.Errorf("failed to count orphan proxies: %w", err)
+	}
+	return total, nil
+}
+
+// CheckAllProxiesWithProgress tests orphan proxies and reports progress.
+func (h *HealthChecker) CheckAllProxiesWithProgress(
+	ctx context.Context,
+	onProgress func(checked, active, failed int),
+) ([]models.ProxyTestResult, error) {
 	// Load settings
 	settings, err := h.settingsRepo.GetAll(ctx)
 	if err != nil {
@@ -220,9 +247,19 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 
 	h.logger.Info("starting health check", "proxy_count", len(proxies), "workers", h.settings.Workers)
 
+	workers := h.settings.Workers
+	if workers <= 0 {
+		workers = 20
+		h.logger.Warn("health check workers is non-positive, using fallback", "configured_workers", h.settings.Workers, "fallback_workers", workers)
+	}
+
 	// Create worker pool
-	wp := workerpool.New(h.settings.Workers)
+	wp := workerpool.New(workers)
 	results := make([]models.ProxyTestResult, len(proxies))
+	var statsMu sync.Mutex
+	checked := 0
+	active := 0
+	failed := 0
 
 	// Submit jobs
 	for i, proxy := range proxies {
@@ -230,6 +267,8 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 		p := proxy
 		wp.Submit(func() {
 			result, err := h.CheckProxy(ctx, p, true)
+			statsMu.Lock()
+			defer statsMu.Unlock()
 			if err != nil {
 				h.logger.Error("health check error",
 					"proxy_id", p.ID,
@@ -244,8 +283,18 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 				}
 				errMsg := err.Error()
 				results[idx].Error = &errMsg
+				failed++
 			} else {
 				results[idx] = *result
+				if result.Status == "active" {
+					active++
+				} else {
+					failed++
+				}
+			}
+			checked++
+			if onProgress != nil {
+				onProgress(checked, active, failed)
 			}
 		})
 	}

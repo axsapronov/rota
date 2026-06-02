@@ -15,7 +15,7 @@ import {
 } from "lucide-react"
 import { formatBytes, formatNumber, getUsageColor } from "@/lib/format-utils"
 import { cn } from "@/lib/utils"
-import type { CleanupMetrics, GeoIPMetrics, HealthCheckMetrics } from "@/lib/types"
+import type { CleanupMetrics, GeoIPMetrics, GlobalHealthCheckMetrics, HealthCheckMetrics } from "@/lib/types"
 
 interface SystemMetricsProps {
   data?: {
@@ -44,6 +44,7 @@ interface SystemMetricsProps {
     }
     geoip?: GeoIPMetrics
     health_check?: HealthCheckMetrics
+    global_health_check?: GlobalHealthCheckMetrics
     cleanup?: CleanupMetrics
   }
 }
@@ -300,13 +301,19 @@ export function SystemMetrics({ data }: SystemMetricsProps) {
         </Card>
       </div>
 
-      {(metrics.geoip || metrics.health_check || metrics.cleanup) && (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      {(metrics.geoip || metrics.health_check) && (
+        <div className="grid gap-4 md:grid-cols-2">
           {metrics.geoip && <GeoIPMetricsPanel geo={metrics.geoip} />}
-          {metrics.health_check && (
-            <HealthCheckMetricsPanel hc={metrics.health_check} />
-          )}
+          {metrics.health_check && <HealthCheckMetricsPanel hc={metrics.health_check} />}
+        </div>
+      )}
+
+      {(metrics.cleanup || metrics.global_health_check) && (
+        <div className="grid gap-4 md:grid-cols-2">
           {metrics.cleanup && <ProxyCleanupMetricsPanel cleanup={metrics.cleanup} />}
+          {metrics.global_health_check && (
+            <GlobalHealthCheckPanel global={metrics.global_health_check} />
+          )}
         </div>
       )}
     </div>
@@ -459,6 +466,36 @@ function ProxyCleanupMetricsPanel({ cleanup }: { cleanup: CleanupMetrics }) {
         <div className="space-y-1">
           <p className="text-sm text-muted-foreground">Next run</p>
           <p className="text-sm font-medium">{formatDateTime(cleanup.proxy.next_run_at)}</p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function GlobalHealthCheckPanel({ global }: { global: GlobalHealthCheckMetrics }) {
+  const formatDateTime = (value?: string) => {
+    if (!value) return "—"
+    const dt = new Date(value)
+    if (Number.isNaN(dt.getTime())) return "—"
+    return dt.toLocaleString()
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <HeartPulse className="h-4 w-4" />
+          Global healthcheck
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-1">
+          <p className="text-sm text-muted-foreground">Last run</p>
+          <p className="text-sm font-medium">{formatDateTime(global.last_finished_at)}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-sm text-muted-foreground">Next run</p>
+          <p className="text-sm font-medium">{formatDateTime(global.next_run_at)}</p>
         </div>
       </CardContent>
     </Card>

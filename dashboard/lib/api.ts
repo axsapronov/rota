@@ -224,6 +224,23 @@ class ApiClient {
     })
   }
 
+  async startProxyHealthCheck(proxyIds: number[], workers?: number): Promise<{ job_id: string; status: string; total: number }> {
+    return this.request("/api/v1/proxies/test/bulk", {
+      method: "POST",
+      body: JSON.stringify({ proxy_ids: proxyIds, workers: workers ?? 20 }),
+    })
+  }
+
+  async startGlobalHealthCheck(): Promise<{ job_id: string; status: string; total: number }> {
+    return this.request("/api/v1/proxies/test/global", {
+      method: "POST",
+    })
+  }
+
+  async getProxyHealthCheckJob(jobId: string): Promise<HCJob> {
+    return this.request(`/api/v1/proxies/test/${jobId}`)
+  }
+
   async exportProxies(format: "txt" | "json" | "csv" = "txt", status?: string): Promise<Blob> {
     const params = new URLSearchParams({ format })
     if (status) params.append("status", status)

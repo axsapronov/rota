@@ -74,7 +74,7 @@ import {
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api } from "@/lib/api"
-import { GeoSummaryItem, Proxy } from "@/lib/types"
+import { GeoSummaryItem, HCJob, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
 
 const FLAG_CDN = (cc: string) =>
@@ -128,6 +128,9 @@ export default function ProxiesPage() {
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
   const [isBulkTesting, setIsBulkTesting] = React.useState(false)
+  const [hcJob, setHcJob] = React.useState<HCJob | null>(null)
+  const [hcRunning, setHcRunning] = React.useState(false)
+  const hcPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
    const [deleteAllConfirm, setDeleteAllConfirm] = React.useState(false)
 
   // Debounce search query
@@ -228,24 +231,47 @@ export default function ProxiesPage() {
     }
   }
 
+  const stopJobPoll = React.useCallback(() => {
+    if (hcPollRef.current) {
+      clearInterval(hcPollRef.current)
+      hcPollRef.current = null
+    }
+  }, [])
+
+  const pollProxyHealthCheckJob = React.useCallback((jobId: string) => {
+    stopJobPoll()
+    hcPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.getProxyHealthCheckJob(jobId)
+        setHcJob(job)
+        if (job.status === "done" || job.status === "failed") {
+          stopJobPoll()
+          setHcRunning(false)
+          setIsBulkTesting(false)
+          if (job.status === "done") {
+            toast.success("Proxy test job completed", `${job.active} active, ${job.failed} failed`)
+          } else {
+            toast.error("Proxy test job failed", job.error || "Unknown error")
+          }
+          fetchProxies()
+        }
+      } catch {
+        stopJobPoll()
+        setHcRunning(false)
+        setIsBulkTesting(false)
+      }
+    }, 1000)
+  }, [fetchProxies, stopJobPoll])
+
   const handleTestProxy = async (id: number) => {
     try {
-      const result = await api.testProxy(id)
-      if (result.status === "active") {
-        const responseTime = result.response_time || result.duration || 0
-        toast.success(
-          "Proxy test successful",
-          `${result.address} - Response time: ${responseTime}ms`
-        )
-      } else {
-        toast.error(
-          "Proxy test failed",
-          `${result.address} - ${result.error || "Unknown error"}`
-        )
-      }
-      fetchProxies()
+      setHcRunning(true)
+      const started = await api.startProxyHealthCheck([id], 1)
+      pollProxyHealthCheckJob(started.job_id)
+      toast.success("Proxy test enqueued", `Job ${started.job_id.slice(0, 8)} started`)
     } catch (error) {
       console.error("Failed to test proxy:", error)
+      setHcRunning(false)
       toast.error("Failed to test proxy", error instanceof Error ? error.message : "Unknown error")
     }
   }
@@ -258,51 +284,39 @@ export default function ProxiesPage() {
     if (selectedIds.length === 0) return
 
     setIsBulkTesting(true)
-    let passed = 0
-    let failed = 0
 
     try {
-      const results = await Promise.allSettled(
-        selectedIds.map((id) => api.testProxy(id))
-      )
-
-      for (const result of results) {
-        if (result.status === "fulfilled" && result.value.status === "active") {
-          passed++
-        } else {
-          failed++
-        }
-      }
-
-      const total = selectedIds.length
-      if (failed === 0) {
-        toast.success(
-          "Bulk test completed",
-          `${passed} of ${total} proxies passed`
-        )
-      } else if (passed === 0) {
-        toast.error(
-          "Bulk test completed",
-          `All ${total} proxies failed`
-        )
-      } else {
-        toast.success(
-          "Bulk test completed",
-          `${passed} passed, ${failed} failed (${total} total)`
-        )
-      }
-
-      fetchProxies()
+      setHcRunning(true)
+      const started = await api.startProxyHealthCheck(selectedIds, 20)
+      pollProxyHealthCheckJob(started.job_id)
+      toast.success("Bulk test enqueued", `${selectedIds.length} proxies added to queue`)
     } catch (error) {
       console.error("Failed to bulk test proxies:", error)
+      setHcRunning(false)
+      setIsBulkTesting(false)
       toast.error(
         "Failed to bulk test proxies",
         error instanceof Error ? error.message : "Unknown error"
       )
-    } finally {
-      setIsBulkTesting(false)
     }
   }
+
+  const handleRunGlobalHealthCheck = async () => {
+    try {
+      setIsBulkTesting(true)
+      setHcRunning(true)
+      const started = await api.startGlobalHealthCheck()
+      pollProxyHealthCheckJob(started.job_id)
+      toast.success("Global health check enqueued", `Job ${started.job_id.slice(0, 8)} started`)
+    } catch (error) {
+      console.error("Failed to run global health check:", error)
+      setHcRunning(false)
+      setIsBulkTesting(false)
+      toast.error("Failed to run global health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  React.useEffect(() => () => stopJobPoll(), [stopJobPoll])
 
   const handleBulkDelete = async () => {
     const selectedIds = getSelectedProxyIds()
@@ -791,22 +805,37 @@ export default function ProxiesPage() {
                 <Plus className="mr-2 h-4 w-4" />
                 Add Proxy
               </Button>
-              <Button
-                variant="outline"
-                onClick={handleReloadProxies}
-                disabled={isReloading}
-              >
-                <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
-                Reload Pool
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleRunProxyCleanup}
-                disabled={isRunningCleanup}
-              >
-                <Loader2 className={`mr-2 h-4 w-4 ${isRunningCleanup ? 'animate-spin' : ''}`} />
-                Run Cleanup
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline">
+                    Jobs
+                    <ChevronDown className="ml-2 h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>Jobs</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleReloadProxies} disabled={isReloading}>
+                    <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
+                    Reload pool
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleRunProxyCleanup} disabled={isRunningCleanup}>
+                    <Loader2 className={`mr-2 h-4 w-4 ${isRunningCleanup ? 'animate-spin' : ''}`} />
+                    Run cleanup
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={handleRunGlobalHealthCheck}
+                    disabled={isBulkTesting || hcRunning}
+                  >
+                    {isBulkTesting ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="mr-2 h-4 w-4" />
+                    )}
+                    Run health check
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline">
@@ -835,7 +864,7 @@ export default function ProxiesPage() {
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={handleBulkTest}
-                    disabled={Object.keys(rowSelection).length === 0 || isBulkTesting}
+                    disabled={Object.keys(rowSelection).length === 0 || isBulkTesting || hcRunning}
                   >
                     {isBulkTesting ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -867,6 +896,17 @@ export default function ProxiesPage() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            {hcJob && hcJob.kind !== "orphan" && (
+              <div className="rounded-md border p-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Healthcheck queue job</span>
+                  <Badge variant="outline" className="capitalize">{hcJob.status}</Badge>
+                </div>
+                <p className="text-muted-foreground mt-1">
+                  Progress: {hcJob.progress}/{hcJob.total} · Active: {hcJob.active} · Failed: {hcJob.failed}
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <Input
                 placeholder="Search by address..."

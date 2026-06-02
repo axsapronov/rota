@@ -86,6 +86,21 @@ export interface HealthCheckMetrics {
   success_percent_1m: number
 }
 
+export type GlobalHealthCheckStatus = "idle" | "ok" | "error"
+
+export interface GlobalHealthCheckMetrics {
+  enabled: boolean
+  interval_minutes: number
+  is_running: boolean
+  last_started_at?: string
+  last_finished_at?: string
+  last_status: GlobalHealthCheckStatus
+  last_duration_ms: number
+  last_error?: string
+  next_run_at?: string
+  last_checked_proxies: number
+}
+
 export type CleanupStatus = "idle" | "ok" | "error"
 
 export interface LogCleanupMetrics {
@@ -143,6 +158,7 @@ export interface SystemMetrics {
   }
   geoip?: GeoIPMetrics
   health_check?: HealthCheckMetrics
+  global_health_check?: GlobalHealthCheckMetrics
   cleanup?: CleanupMetrics
 }
 
@@ -178,6 +194,10 @@ export interface Settings {
     url: string
     status: number
     headers: string[]
+  }
+  global_health_check: {
+    enabled: boolean
+    interval_minutes: number
   }
   log_retention: {
     enabled: boolean
@@ -376,6 +396,7 @@ export type HCJobStatus = "pending" | "running" | "done" | "failed"
 
 export interface HCJob {
   id: string
+  kind?: "pool" | "proxy" | "orphan"
   pool_id: number
   pool_name: string
   status: HCJobStatus

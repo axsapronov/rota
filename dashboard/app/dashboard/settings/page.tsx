@@ -758,6 +758,49 @@ export default function SettingsPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="global-healthcheck-enabled">Global Health check</Label>
+                <p className="text-xs text-muted-foreground">
+                  Schedule orphan proxy health checks in the background
+                </p>
+              </div>
+              <Switch
+                id="global-healthcheck-enabled"
+                checked={settings.global_health_check?.enabled ?? true}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    global_health_check: {
+                      ...(settings.global_health_check || { enabled: true, interval_minutes: 30 }),
+                      enabled: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+            {settings.global_health_check?.enabled && (
+              <div className="space-y-2">
+                <Label htmlFor="global-healthcheck-interval">Interval (minutes)</Label>
+                <Input
+                  id="global-healthcheck-interval"
+                  type="number"
+                  min="1"
+                  max="1440"
+                  value={settings.global_health_check.interval_minutes ?? 30}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      global_health_check: {
+                        ...(settings.global_health_check || { enabled: true, interval_minutes: 30 }),
+                        interval_minutes: parseInt(e.target.value) || 30,
+                      },
+                    })
+                  }
+                />
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label htmlFor="healthcheck-timeout">Timeout (seconds)</Label>
               <Input
