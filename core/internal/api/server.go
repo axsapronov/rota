@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
@@ -159,10 +161,13 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	poolSvc.Start(context.Background())
 	alertWatcher.Start(context.Background())
 
-	// NOTE: global StartPeriodicHealthCheck is intentionally NOT started.
-	// Its 60s timeout was too lenient and kept flapping pool-marked 'failed'
-	// proxies back to 'active', returning dead proxies to rotation.
-	// Pool-level health checks (PoolService cron) are authoritative.
+	// Periodic health checks are limited to orphan proxies only (proxies that do
+	// not belong to any pool), so pool-level health checks remain authoritative.
+	if isHealthCheckEnabled() {
+		intervalMinutes := healthCheckIntervalMinutes()
+		go healthChecker.StartPeriodicHealthCheck(context.Background(), time.Duration(intervalMinutes)*time.Minute)
+		log.Info("orphan periodic health check enabled", "interval_minutes", intervalMinutes)
+	}
 
 	cleanupSvc.Start(context.Background())
 
@@ -375,4 +380,30 @@ func generateJWTSecret() string {
 
 	// Convert to hex string (64 characters)
 	return hex.EncodeToString(bytes)
+}
+
+func isHealthCheckEnabled() bool {
+	value := os.Getenv("HEALTHCHECK_ENABLED")
+	if value == "" {
+		return true
+	}
+
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return true
+	}
+	return enabled
+}
+
+func healthCheckIntervalMinutes() int {
+	value := os.Getenv("HEALTHCHECK_INTERVAL_MINUTES")
+	if value == "" {
+		return 30
+	}
+
+	interval, err := strconv.Atoi(value)
+	if err != nil || interval < 1 {
+		return 30
+	}
+	return interval
 }

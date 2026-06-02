@@ -169,7 +169,7 @@ func (h *HealthChecker) persistCheckResult(ctx context.Context, proxyID int, suc
 	checkstats.Record(success)
 }
 
-// CheckAllProxies tests all proxies concurrently
+// CheckAllProxies tests orphan proxies (not attached to any pool) concurrently.
 func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error) {
 	// Load settings
 	settings, err := h.settingsRepo.GetAll(ctx)
@@ -178,13 +178,19 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 	}
 	h.settings = &settings.HealthCheck
 
-	// Get all proxies (including failed ones for re-testing)
+	// Get only orphan proxies (not assigned to any pool) to avoid
+	// interfering with pool-level health checks.
 	query := `
 		SELECT
 			id, address, protocol, username, password, status,
 			requests, successful_requests, failed_requests,
 			avg_response_time, last_check, last_error, created_at, updated_at
-		FROM proxies
+		FROM proxies p
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM pool_proxies ppm
+			WHERE ppm.proxy_id = p.id
+		)
 		ORDER BY address
 	`
 
@@ -223,7 +229,7 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 		idx := i
 		p := proxy
 		wp.Submit(func() {
-			result, err := h.CheckProxy(ctx, p, false)
+			result, err := h.CheckProxy(ctx, p, true)
 			if err != nil {
 				h.logger.Error("health check error",
 					"proxy_id", p.ID,

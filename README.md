@@ -163,8 +163,16 @@ All settings are controlled through a single `.env` file (see `.env.example` for
 | `GEOIP_BATCH_REQUESTS_PER_MINUTE` | `15` | Max ip-api.com batch HTTP requests per minute (free tier) |
 | `GEOIP_BATCH_SIZE` | `100` | Max IPs per batch POST (1–100) |
 | `GEOIP_MAX_RETRIES` | `3` | Retries on HTTP 429 / 5xx |
+| `HEALTHCHECK_ENABLED` | `true` | Enable periodic health check only for proxies that are not in any pool |
+| `HEALTHCHECK_INTERVAL_MINUTES` | `30` | Interval (minutes) for orphan-only periodic health checks (when enabled) |
 
 > **Note**: `ROTA_ADMIN_USER` and `ROTA_ADMIN_PASSWORD` are only used when the database is empty (first start). After that, use the **Settings → Admin Account** page to change credentials.
+
+### Orphan-Only Periodic Health Check
+
+When `HEALTHCHECK_ENABLED=true`, the periodic health checker runs only for proxies that are not assigned to any pool (`pool_proxies` has no row for that proxy). This avoids conflicts with pool-level health checks, which remain authoritative for pool members.
+
+The periodic checker uses existing `healthcheck` settings from the database (URL, expected status, workers, headers, timeout). If `HEALTHCHECK_ENABLED` is not set, periodic checks are enabled by default. Use `HEALTHCHECK_ENABLED=false` to disable it.
 
 ### Production Deployment
 
