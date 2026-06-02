@@ -64,7 +64,7 @@ func parseProxyLine(line string) (parsedProxy, bool) {
 				pass = &p
 			}
 		}
-		host := parsed.Host
+		host := normalizeProxyAddress(parsed.Host)
 		// url.Parse puts host:port in Host
 		if !strings.Contains(host, ":") {
 			return parsedProxy{}, false // no port — unusable
@@ -79,7 +79,7 @@ func parseProxyLine(line string) (parsedProxy, bool) {
 
 	// ── 3. Fallback: bare host:port (no userinfo) ─────────────────────────
 	if strings.Contains(line, ":") {
-		return parsedProxy{address: line, protocol: proto}, true
+		return parsedProxy{address: normalizeProxyAddress(line), protocol: proto}, true
 	}
 
 	return parsedProxy{}, false
@@ -91,9 +91,13 @@ type ProxyTester interface {
 }
 
 const (
-	geoQueueSize     = 32
-	geoEnrichChunk   = 200
-	geoSyncDebounce  = 30 * time.Second
+	geoSyncDebounce       = 30 * time.Second
+	geoBatchCollectWindow = 300 * time.Millisecond
+	geoIdleSleep          = 5 * time.Second
+	geoDBDrainLimit       = 100
+
+	// Proxies matching this need GeoIP enrichment (no country yet, not skipped).
+	geoPendingSQL = `country_code IS NULL AND geo_updated_at IS NULL`
 )
 
 // SourceService fetches proxy lists from remote URLs and imports them into the DB.
@@ -109,12 +113,9 @@ type SourceService struct {
 	mu     sync.Mutex
 	stopCh chan struct{}
 
-	geoCh        chan []string
-	geoPending   map[string]struct{}
-	geoMu        sync.Mutex
+	geoQueue     *geoAddressQueue
 	geoSyncMu    sync.Mutex
 	geoSyncTimer *time.Timer
-
 }
 
 // NewSourceService creates a new SourceService.
@@ -132,9 +133,8 @@ func NewSourceService(
 		geoSvc:     geoSvc,
 		logger:     log,
 		client:     &http.Client{Timeout: 30 * time.Second},
-		stopCh:     make(chan struct{}),
-		geoCh:      make(chan []string, geoQueueSize),
-		geoPending: make(map[string]struct{}),
+		stopCh:   make(chan struct{}),
+		geoQueue: newGeoAddressQueue(),
 	}
 }
 
@@ -285,63 +285,220 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 		}
 	}
 
-	s.enqueueGeo(addresses)
+	needGeo, err := s.filterAddressesNeedingGeo(ctx, addresses)
+	if err != nil {
+		s.logger.Warn("failed to filter addresses for geo enqueue", "error", err)
+		needGeo = addresses
+	}
+	go s.enqueueGeo(needGeo)
 
 	return created, total, nil
 }
 
-// enqueueGeo adds addresses to the single geo enrichment worker queue (deduped).
 func (s *SourceService) enqueueGeo(addresses []string) int {
 	if len(addresses) == 0 {
 		return 0
 	}
-	var batch []string
-	s.geoMu.Lock()
-	for _, addr := range addresses {
-		if _, ok := s.geoPending[addr]; ok {
-			continue
+	added := s.geoQueue.Enqueue(addresses)
+	if added > 0 {
+		backlog := 0
+		if s.proxyRepo != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			backlog, _ = s.countProxiesWithoutGeo(ctx)
+			cancel()
 		}
-		s.geoPending[addr] = struct{}{}
-		batch = append(batch, addr)
+		s.logger.Info("geo enqueue",
+			"added", added,
+			"skipped_dup", len(addresses)-added,
+			"queue_len", s.geoQueue.Len(),
+			"db_backlog", backlog,
+		)
 	}
-	s.geoMu.Unlock()
-	if len(batch) == 0 {
-		return 0
-	}
-	s.geoCh <- batch
-	return len(batch)
-}
-
-func (s *SourceService) releaseGeoPending(addresses []string) {
-	s.geoMu.Lock()
-	for _, addr := range addresses {
-		delete(s.geoPending, addr)
-	}
-	s.geoMu.Unlock()
+	return added
 }
 
 func (s *SourceService) runGeoWorker(ctx context.Context) {
-	s.logger.Info("geo enrichment worker started")
+	batchSize := s.geoSvc.BatchSize()
+	s.logger.Info("geo worker started",
+		"batch_rpm", s.geoSvc.BatchRequestsPerMinute(),
+		"batch_size", batchSize,
+	)
+
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			s.logger.Info("geo enrichment worker stopped")
 			return
-		case addrs := <-s.geoCh:
-			updated := s.enrichGeo(ctx, addrs)
-			s.releaseGeoPending(addrs)
-			s.geoSvc.recordProcessed(updated)
-			s.scheduleSyncPoolsDebounced(ctx)
+		}
+
+		addrs := s.collectGeoBatch(ctx, batchSize)
+		if len(addrs) == 0 {
+			if n := s.drainGeoFromDB(); n > 0 {
+				s.logger.Info("geo backlog drain enqueued", "addresses", n)
+				continue
+			}
+			s.logger.Debug("geo worker idle")
+			time.Sleep(geoIdleSleep)
+			continue
+		}
+
+		s.processGeoBatch(ctx, addrs)
+		s.scheduleSyncPoolsDebounced(ctx)
+	}
+}
+
+// collectGeoBatch returns up to maxSize addresses from the in-memory queue.
+// If the queue is empty it returns nil immediately (caller should drain DB backlog).
+func (s *SourceService) collectGeoBatch(ctx context.Context, maxSize int) []string {
+	if maxSize <= 0 {
+		return nil
+	}
+
+	var first string
+	select {
+	case <-ctx.Done():
+		return nil
+	case first = <-s.geoQueue.ch:
+	default:
+		return nil
+	}
+
+	batch := []string{first}
+	deadline := time.After(geoBatchCollectWindow)
+	for len(batch) < maxSize {
+		select {
+		case addr := <-s.geoQueue.ch:
+			batch = append(batch, addr)
+		case <-deadline:
+			return batch
+		case <-ctx.Done():
+			return batch
 		}
 	}
+	return batch
+}
+
+func (s *SourceService) drainGeoFromDB() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+		`SELECT address FROM proxies WHERE `+geoPendingSQL+` ORDER BY address LIMIT $1`,
+		geoDBDrainLimit,
+	)
+	if err != nil {
+		s.logger.Warn("geo backlog drain query failed", "error", err)
+		return 0
+	}
+	defer rows.Close()
+
+	var addresses []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		addresses = append(addresses, addr)
+	}
+	if len(addresses) == 0 {
+		return 0
+	}
+	return s.geoQueue.Enqueue(addresses)
+}
+
+func (s *SourceService) processGeoBatch(ctx context.Context, addresses []string) {
+	defer s.geoQueue.Release(addresses)
+
+	start := time.Now()
+	backlog, _ := s.countProxiesWithoutGeo(ctx)
+
+	ipToAddrs := make(map[string][]string)
+	var ips []string
+	skipped := 0
+	for _, addr := range addresses {
+		ip := extractIP(addr)
+		if ip == "" {
+			s.markGeoSkipped(ctx, addr, "unparseable_address")
+			skipped++
+			continue
+		}
+		if isSkippableGeoIP(ip) {
+			s.markGeoSkipped(ctx, addr, "reserved_or_private_ip")
+			skipped++
+			continue
+		}
+		if _, seen := ipToAddrs[ip]; !seen {
+			ips = append(ips, ip)
+		}
+		ipToAddrs[ip] = append(ipToAddrs[ip], addr)
+	}
+	if skipped > 0 {
+		s.logger.Debug("geo batch skipped addresses", "skipped", skipped)
+	}
+
+	s.logger.Info("geo batch start",
+		"ips", len(ips),
+		"queue_len", s.geoQueue.Len(),
+		"db_backlog", backlog,
+	)
+
+	geos, err := s.geoSvc.LookupBatch(ctx, ips)
+	if err != nil {
+		s.logger.Warn("geo batch lookup failed",
+			"ips", len(ips),
+			"error", err,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	updated := 0
+	for ip, geo := range geos {
+		for _, addr := range ipToAddrs[ip] {
+			if _, execErr := s.proxyRepo.GetDB().Pool.Exec(ctx, `
+				UPDATE proxies SET
+					country_code   = $1,
+					country_name   = $2,
+					region_name    = $3,
+					city_name      = $4,
+					latitude       = $5,
+					longitude      = $6,
+					isp            = $7,
+					geo_updated_at = NOW()
+				WHERE address = $8 AND country_code IS NULL
+			`, geo.CountryCode, geo.CountryName, geo.RegionName, geo.CityName,
+				geo.Latitude, geo.Longitude, geo.ISP, addr,
+			); execErr != nil {
+				s.logger.Warn("failed to update geo for proxy", "address", addr, "error", execErr)
+			} else {
+				updated++
+			}
+		}
+	}
+
+	s.geoSvc.RecordDBUpdates(updated)
+
+	lookupFail := len(ips) - len(geos)
+	s.logger.Info("geo batch done",
+		"ips", len(ips),
+		"lookup_ok", len(geos),
+		"lookup_fail", lookupFail,
+		"updated", updated,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"queue_len", s.geoQueue.Len(),
+		"db_backlog", backlog,
+	)
 }
 
 // GeoIPMetrics returns combined GeoIP service and queue metrics.
 func (s *SourceService) GeoIPMetrics() GeoIPMetricsSnapshot {
-	s.geoMu.Lock()
-	pending := len(s.geoPending)
-	s.geoMu.Unlock()
-	return s.geoSvc.MetricsSnapshot(pending)
+	backlog := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if n, err := s.countProxiesWithoutGeo(ctx); err == nil {
+		backlog = n
+	} else {
+		s.logger.Warn("failed to count geo backlog", "error", err)
+	}
+	return s.geoSvc.Metrics(backlog, s.geoQueue.Len())
 }
 
 func (s *SourceService) scheduleSyncPoolsDebounced(ctx context.Context) {
@@ -372,39 +529,48 @@ func (s *SourceService) bulkUpsert(ctx context.Context, proxies []models.CreateP
 	return created, failed
 }
 
-// enrichGeo fetches geo data for the given addresses and updates the DB.
-// Returns the number of proxies updated in the database.
-func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) int {
-	if len(addresses) == 0 {
-		return 0
+func (s *SourceService) markGeoSkipped(ctx context.Context, address, reason string) {
+	if s.proxyRepo == nil {
+		return
 	}
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
-	if len(geos) == 0 {
-		return 0
+	_, err := s.proxyRepo.GetDB().Pool.Exec(ctx,
+		`UPDATE proxies SET geo_updated_at = NOW() WHERE address = $1 AND `+geoPendingSQL,
+		address,
+	)
+	if err != nil {
+		s.logger.Warn("failed to mark geo skipped", "address", address, "reason", reason, "error", err)
+		return
 	}
+	s.logger.Debug("geo lookup skipped", "address", address, "reason", reason)
+}
 
-	updated := 0
-	for addr, geo := range geos {
-		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
-			UPDATE proxies SET
-				country_code   = $1,
-				country_name   = $2,
-				region_name    = $3,
-				city_name      = $4,
-				latitude       = $5,
-				longitude      = $6,
-				isp            = $7,
-				geo_updated_at = NOW()
-			WHERE address = $8
-		`, geo.CountryCode, geo.CountryName, geo.RegionName, geo.CityName,
-			geo.Latitude, geo.Longitude, geo.ISP, addr,
-		); err != nil {
-			s.logger.Warn("failed to update geo for proxy", "address", addr, "error", err)
-		} else {
-			updated++
-		}
+func (s *SourceService) filterAddressesNeedingGeo(ctx context.Context, addresses []string) ([]string, error) {
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+		`SELECT address FROM proxies WHERE `+geoPendingSQL+` AND address = ANY($1)`,
+		addresses,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return updated
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out, rows.Err()
+}
+
+func (s *SourceService) countProxiesWithoutGeo(ctx context.Context) (int, error) {
+	var n int
+	err := s.proxyRepo.GetDB().Pool.QueryRow(ctx,
+		`SELECT COUNT(*)::int FROM proxies WHERE `+geoPendingSQL,
+	).Scan(&n)
+	return n, err
 }
 
 // EnrichAll queues geo enrichment for all proxies without geo data.
@@ -413,8 +579,8 @@ func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 	offset := 0
 	for {
 		rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
-			`SELECT address FROM proxies WHERE country_code IS NULL ORDER BY address LIMIT $1 OFFSET $2`,
-			geoEnrichChunk, offset,
+			`SELECT address FROM proxies WHERE `+geoPendingSQL+` ORDER BY address LIMIT $1 OFFSET $2`,
+			geoDBDrainLimit, offset,
 		)
 		if err != nil {
 			return queued, err
@@ -435,7 +601,7 @@ func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 		}
 		queued += s.enqueueGeo(addresses)
 		offset += len(addresses)
-		if len(addresses) < geoEnrichChunk {
+		if len(addresses) < geoDBDrainLimit {
 			break
 		}
 	}

@@ -160,11 +160,9 @@ All settings are controlled through a single `.env` file (see `.env.example` for
 | `AUTH_IP_BLOCK_MINUTES` | `30` | How long a blocked IP cannot attempt login |
 | `AUTH_GLOBAL_MAX_PER_MINUTE` | `1000` | Max total login attempts/min across all IPs before global lockout |
 | `AUTH_GLOBAL_LOCKOUT_MINUTES` | `1` | Duration of global login lockout |
-| `GEOIP_QUERIES_PER_MINUTE` | `40` | Max ip-api.com lookups per minute (free tier allows ~45) |
-| `GEOIP_BATCH_MAX` | `100` | Max IPs per batch request |
+| `GEOIP_BATCH_REQUESTS_PER_MINUTE` | `15` | Max ip-api.com batch HTTP requests per minute (free tier) |
+| `GEOIP_BATCH_SIZE` | `100` | Max IPs per batch POST (1–100) |
 | `GEOIP_MAX_RETRIES` | `3` | Retries on HTTP 429 / 5xx |
-| `GEOIP_CACHE_TTL_HOURS` | `24` | How long successful lookups are cached |
-| `GEOIP_NEGATIVE_CACHE_MINUTES` | `5` | Skip re-querying IPs after a failed lookup |
 
 > **Note**: `ROTA_ADMIN_USER` and `ROTA_ADMIN_PASSWORD` are only used when the database is empty (first start). After that, use the **Settings → Admin Account** page to change credentials.
 

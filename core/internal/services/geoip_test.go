@@ -15,11 +15,38 @@ import (
 
 func testGeoIPConfig() config.GeoIPConfig {
 	return config.GeoIPConfig{
-		QueriesPerMinute:     1000,
-		BatchMax:             100,
-		MaxRetries:           3,
-		CacheTTLHours:        24,
-		NegativeCacheMinutes: 5,
+		BatchRequestsPerMinute: 15,
+		BatchSize:              100,
+		MaxRetries:             3,
+	}
+}
+
+func TestGeoIPService_LookupBatchSingleHTTP(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode([]ipAPIResponse{
+			{Status: "success", CountryCode: "US", Query: "8.8.8.8"},
+			{Status: "success", CountryCode: "DE", Query: "1.1.1.1"},
+		})
+	}))
+	defer srv.Close()
+
+	log := logger.New("error")
+	g := newGeoIPServiceForTest(log, testGeoIPConfig(), srv.URL)
+
+	geos, err := g.LookupBatch(context.Background(), []string{"8.8.8.8", "1.1.1.1"})
+	if err != nil {
+		t.Fatalf("LookupBatch: %v", err)
+	}
+	if len(geos) != 2 {
+		t.Fatalf("results = %d, want 2", len(geos))
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("http calls = %d, want 1", calls.Load())
 	}
 }
 
@@ -49,42 +76,19 @@ func TestGeoIPService_Retry429ThenSuccess(t *testing.T) {
 	log := logger.New("error")
 	g := newGeoIPServiceForTest(log, testGeoIPConfig(), srv.URL)
 
-	geo, err := g.LookupOne(context.Background(), "8.8.8.8:8080")
+	geos, err := g.LookupBatch(context.Background(), []string{"8.8.8.8"})
 	if err != nil {
-		t.Fatalf("LookupOne: %v", err)
+		t.Fatalf("LookupBatch: %v", err)
 	}
-	if geo.CountryCode != "US" {
-		t.Fatalf("country = %q, want US", geo.CountryCode)
+	if geos["8.8.8.8"].CountryCode != "US" {
+		t.Fatalf("country = %q, want US", geos["8.8.8.8"].CountryCode)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("http calls = %d, want 2", calls.Load())
 	}
 }
 
-func TestGeoIPService_NegativeCacheAfterFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-
-	cfg := testGeoIPConfig()
-	cfg.MaxRetries = 0
-	log := logger.New("error")
-	g := newGeoIPServiceForTest(log, cfg, srv.URL)
-
-	ctx := context.Background()
-	_, err := g.LookupOne(ctx, "1.2.3.4:8080")
-	if err == nil {
-		t.Fatal("expected error on 429")
-	}
-
-	_, err = g.LookupOne(ctx, "1.2.3.4:8080")
-	if err == nil {
-		t.Fatal("expected negative cache skip")
-	}
-}
-
-func TestGeoIPService_RateLimiterWaits(t *testing.T) {
+func TestGeoIPService_BatchRateLimiterWaits(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]ipAPIResponse{{
 			Status: "success", CountryCode: "US", Query: "9.9.9.9",
@@ -93,45 +97,60 @@ func TestGeoIPService_RateLimiterWaits(t *testing.T) {
 	defer srv.Close()
 
 	cfg := config.GeoIPConfig{
-		QueriesPerMinute:     2,
-		BatchMax:             1,
-		MaxRetries:           0,
-		CacheTTLHours:        24,
-		NegativeCacheMinutes: 0,
+		BatchRequestsPerMinute: 15,
+		BatchSize:              100,
+		MaxRetries:             0,
 	}
 	log := logger.New("error")
 	g := newGeoIPServiceForTest(log, cfg, srv.URL)
 
 	ctx := context.Background()
 	start := time.Now()
-	if _, err := g.resolveIPs(ctx, []string{"1.1.1.1"}); err != nil {
+	if _, err := g.LookupBatch(ctx, []string{"1.1.1.1"}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if _, err := g.resolveIPs(ctx, []string{"2.2.2.2"}); err != nil {
+	if _, err := g.LookupBatch(ctx, []string{"2.2.2.2"}); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed < 25*time.Second {
-		t.Fatalf("expected rate limit wait >= 25s, got %v", elapsed)
+	if elapsed < 3*time.Second {
+		t.Fatalf("expected batch rate limit wait >= 3s, got %v", elapsed)
 	}
 }
 
-func TestEnqueueGeoDedupe(t *testing.T) {
-	log := logger.New("error")
-	s := &SourceService{
-		logger:     log,
-		geoCh:      make(chan []string, 4),
-		geoPending: make(map[string]struct{}),
+func TestCollectGeoBatch_EmptyQueueReturnsImmediately(t *testing.T) {
+	s := &SourceService{geoQueue: newGeoAddressQueue()}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	var batch []string
+	go func() {
+		batch = s.collectGeoBatch(ctx, 100)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if batch != nil {
+			t.Fatalf("expected nil batch on empty queue, got %v", batch)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("collectGeoBatch blocked on empty queue")
 	}
-	n1 := s.enqueueGeo([]string{"1.2.3.4:8080", "5.6.7.8:8080"})
-	n2 := s.enqueueGeo([]string{"1.2.3.4:8080"})
+}
+
+func TestGeoAddressQueue_EnqueueDedupe(t *testing.T) {
+	q := newGeoAddressQueue()
+	n1 := q.Enqueue([]string{"1.2.3.4:8080", "5.6.7.8:8080"})
+	n2 := q.Enqueue([]string{"1.2.3.4:8080"})
 	if n1 != 2 {
 		t.Fatalf("first enqueue = %d, want 2", n1)
 	}
 	if n2 != 0 {
 		t.Fatalf("duplicate enqueue = %d, want 0", n2)
 	}
-	if len(s.geoCh) != 1 {
-		t.Fatalf("geoCh len = %d, want 1", len(s.geoCh))
+	if len(q.ch) != 2 {
+		t.Fatalf("channel len = %d, want 2", len(q.ch))
 	}
 }

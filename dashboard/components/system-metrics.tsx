@@ -345,7 +345,8 @@ function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
           </div>
           <Progress value={queueBar} variant={queueVariant} className="h-2" />
           <p className="text-xs text-muted-foreground">
-            {formatNumber(geo.processed_last_10m)} processed in the last 10 minutes
+            {formatNumber(geo.queued_in_memory ?? 0)} in memory queue ·{" "}
+            {formatNumber(geo.ips_updated_last_10m)} updated in the last 10 minutes
           </p>
         </div>
 
@@ -358,7 +359,7 @@ function GeoIPMetricsPanel({ geo }: { geo: GeoIPMetrics }) {
                 getUsageColor(geo.usage_percent_1m),
               )}
             >
-              {geo.lookups_last_minute} / {geo.queries_per_minute}
+              {geo.batch_requests_last_minute} / {geo.batch_requests_limit}
             </span>
           </div>
           <Progress
@@ -412,12 +413,7 @@ function HealthCheckMetricsPanel({ hc }: { hc: HealthCheckMetrics }) {
         <div className="space-y-2">
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-sm font-medium">Success rate (1m)</span>
-            <span
-              className={cn(
-                "text-sm font-semibold tabular-nums",
-                getUsageColor(100 - hc.success_percent_1m),
-              )}
-            >
+            <span className="text-sm font-semibold tabular-nums">
               {hc.success_percent_1m.toFixed(0)}% · {formatNumber(hc.checks_last_minute)} checks
             </span>
           </div>

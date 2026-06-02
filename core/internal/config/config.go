@@ -29,13 +29,11 @@ type Config struct {
 	GeoIP GeoIPConfig
 }
 
-// GeoIPConfig holds ip-api.com lookup rate limits and cache settings.
+// GeoIPConfig holds ip-api.com batch endpoint settings (see https://ip-api.com/docs/api:batch).
 type GeoIPConfig struct {
-	QueriesPerMinute     int // GEOIP_QUERIES_PER_MINUTE (default 40, max 45 on free tier)
-	BatchMax             int // GEOIP_BATCH_MAX (default 100)
-	MaxRetries           int // GEOIP_MAX_RETRIES (default 3)
-	CacheTTLHours        int // GEOIP_CACHE_TTL_HOURS (default 24)
-	NegativeCacheMinutes int // GEOIP_NEGATIVE_CACHE_MINUTES (default 5)
+	BatchRequestsPerMinute int // GEOIP_BATCH_REQUESTS_PER_MINUTE (default 15, free tier max)
+	BatchSize              int // GEOIP_BATCH_SIZE (default 100, max IPs per POST)
+	MaxRetries             int // GEOIP_MAX_RETRIES (default 3)
 }
 
 // DatabaseConfig holds database configuration
@@ -80,11 +78,9 @@ func Load() (*Config, error) {
 		AuthGlobalLockoutMin:   getEnvAsInt("AUTH_GLOBAL_LOCKOUT_MINUTES", 1),
 
 		GeoIP: GeoIPConfig{
-			QueriesPerMinute:     getEnvAsInt("GEOIP_QUERIES_PER_MINUTE", 40),
-			BatchMax:             getEnvAsInt("GEOIP_BATCH_MAX", 100),
-			MaxRetries:           getEnvAsInt("GEOIP_MAX_RETRIES", 3),
-			CacheTTLHours:        getEnvAsInt("GEOIP_CACHE_TTL_HOURS", 24),
-			NegativeCacheMinutes: getEnvAsInt("GEOIP_NEGATIVE_CACHE_MINUTES", 5),
+			BatchRequestsPerMinute: getEnvAsInt("GEOIP_BATCH_REQUESTS_PER_MINUTE", 15),
+			BatchSize:              getEnvAsInt("GEOIP_BATCH_SIZE", 100),
+			MaxRetries:             getEnvAsInt("GEOIP_MAX_RETRIES", 3),
 		},
 	}
 
@@ -117,20 +113,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid log level: %s (must be debug, info, warn, or error)", c.LogLevel)
 	}
 
-	if c.GeoIP.QueriesPerMinute < 1 || c.GeoIP.QueriesPerMinute > 45 {
-		return fmt.Errorf("invalid GEOIP_QUERIES_PER_MINUTE: %d (must be 1-45)", c.GeoIP.QueriesPerMinute)
+	if c.GeoIP.BatchRequestsPerMinute < 1 || c.GeoIP.BatchRequestsPerMinute > 15 {
+		return fmt.Errorf("invalid GEOIP_BATCH_REQUESTS_PER_MINUTE: %d (must be 1-15)", c.GeoIP.BatchRequestsPerMinute)
 	}
-	if c.GeoIP.BatchMax < 1 || c.GeoIP.BatchMax > 100 {
-		return fmt.Errorf("invalid GEOIP_BATCH_MAX: %d (must be 1-100)", c.GeoIP.BatchMax)
+	if c.GeoIP.BatchSize < 1 || c.GeoIP.BatchSize > 100 {
+		return fmt.Errorf("invalid GEOIP_BATCH_SIZE: %d (must be 1-100)", c.GeoIP.BatchSize)
 	}
 	if c.GeoIP.MaxRetries < 0 || c.GeoIP.MaxRetries > 10 {
 		return fmt.Errorf("invalid GEOIP_MAX_RETRIES: %d (must be 0-10)", c.GeoIP.MaxRetries)
-	}
-	if c.GeoIP.CacheTTLHours < 1 {
-		return fmt.Errorf("invalid GEOIP_CACHE_TTL_HOURS: %d (must be >= 1)", c.GeoIP.CacheTTLHours)
-	}
-	if c.GeoIP.NegativeCacheMinutes < 0 {
-		return fmt.Errorf("invalid GEOIP_NEGATIVE_CACHE_MINUTES: %d (must be >= 0)", c.GeoIP.NegativeCacheMinutes)
 	}
 
 	return nil

@@ -7,17 +7,20 @@ import (
 
 // GeoIPMetricsSnapshot is returned by the system metrics API.
 type GeoIPMetricsSnapshot struct {
-	QueuePending       int     `json:"queue_pending"`
-	ProcessedLast10m   int     `json:"processed_last_10m"`
-	LookupsLastMinute  int     `json:"lookups_last_minute"`
-	QueriesPerMinute   int     `json:"queries_per_minute"`
-	UsagePercent1m     float64 `json:"usage_percent_1m"`
+	QueuePending             int     `json:"queue_pending"`
+	QueuedInMemory           int     `json:"queued_in_memory"`
+	BatchRequestsLastMinute  int     `json:"batch_requests_last_minute"`
+	BatchRequestsLimit       int     `json:"batch_requests_limit"`
+	UsagePercent1m           float64 `json:"usage_percent_1m"`
+	IPsUpdatedLast10m        int     `json:"ips_updated_last_10m"`
 }
 
 type geoSample struct {
-	at        time.Time
-	lookups   int
-	processed int
+	at            time.Time
+	batchRequests int
+	ipsSuccess    int
+	ipsFailed     int
+	ipsUpdated    int
 }
 
 type geoMetrics struct {
@@ -26,7 +29,7 @@ type geoMetrics struct {
 }
 
 func newGeoMetrics() *geoMetrics {
-	return &geoMetrics{events: make([]geoSample, 0, 64)}
+	return &geoMetrics{events: make([]geoSample, 0, 128)}
 }
 
 func (m *geoMetrics) record(s geoSample) {
@@ -46,15 +49,50 @@ func (m *geoMetrics) record(s geoSample) {
 	}
 }
 
-func (m *geoMetrics) sumSince(since time.Time, field func(geoSample) int) int {
+func (m *geoMetrics) totalsSince(since time.Time) (batchRequests, ipsSuccess, ipsFailed, ipsUpdated int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	total := 0
 	for _, e := range m.events {
 		if e.at.Before(since) {
 			continue
 		}
-		total += field(e)
+		batchRequests += e.batchRequests
+		ipsSuccess += e.ipsSuccess
+		ipsFailed += e.ipsFailed
+		ipsUpdated += e.ipsUpdated
 	}
-	return total
+	return batchRequests, ipsSuccess, ipsFailed, ipsUpdated
+}
+
+func (m *geoMetrics) snapshot(queuePending, queuedInMemory, batchLimit int) GeoIPMetricsSnapshot {
+	now := time.Now()
+	batch1m, _, _, _ := m.totalsSince(now.Add(-time.Minute))
+	_, _, _, updated10mFull := m.totalsSince(now.Add(-10 * time.Minute))
+
+	usage := 0.0
+	if batchLimit > 0 {
+		usage = float64(batch1m) / float64(batchLimit) * 100
+		if usage > 100 {
+			usage = 100
+		}
+	}
+
+	return GeoIPMetricsSnapshot{
+		QueuePending:            queuePending,
+		QueuedInMemory:            queuedInMemory,
+		BatchRequestsLastMinute:   batch1m,
+		BatchRequestsLimit:        batchLimit,
+		UsagePercent1m:            usage,
+		IPsUpdatedLast10m:         updated10mFull,
+	}
+}
+
+// RecordBatchResult records metrics for one completed batch cycle.
+func (m *geoMetrics) RecordBatchResult(batchRequests, ipsSuccess, ipsFailed, ipsUpdated int) {
+	m.record(geoSample{
+		batchRequests: batchRequests,
+		ipsSuccess:    ipsSuccess,
+		ipsFailed:     ipsFailed,
+		ipsUpdated:    ipsUpdated,
+	})
 }
