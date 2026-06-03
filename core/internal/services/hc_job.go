@@ -30,6 +30,7 @@ const (
 	HCJobKindPool   HCJobKind = "pool"
 	HCJobKindProxy  HCJobKind = "proxy"
 	HCJobKindOrphan HCJobKind = "orphan"
+	HCJobKindIdle   HCJobKind = "idle"
 )
 
 type proxyChecker interface {
@@ -46,6 +47,14 @@ type orphanCheckerWithProgress interface {
 
 type orphanCounter interface {
 	CountOrphanProxies(ctx context.Context) (int, error)
+}
+
+type idleOrphanCounter interface {
+	CountOrphanIdleProxies(ctx context.Context) (int, error)
+}
+
+type idleOrphanCheckerWithProgress interface {
+	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int)) ([]models.ProxyTestResult, error)
 }
 
 // HCJob holds state for one async pool health-check run
@@ -393,6 +402,52 @@ func RunOrphanHealthCheckAsync(ctx context.Context, hc orphanChecker) (*HCJob, e
 		} else {
 			results, err = hc.CheckAllProxies(context.Background())
 		}
+		if err != nil {
+			store.finishFailed(job.ID, err)
+			return
+		}
+		active := 0
+		failed := 0
+		for _, r := range results {
+			if r.Status == "active" {
+				active++
+			} else {
+				failed++
+			}
+		}
+		store.Update(job.ID, func(j *HCJob) {
+			j.Total = len(results)
+			j.Progress = len(results)
+			j.Active = active
+			j.Failed = failed
+			j.Results = results
+		})
+		store.finishDone(job.ID)
+	})
+	store.Update(job.ID, func(j *HCJob) {
+		j.Total = total
+	})
+	return job, nil
+}
+
+// RunIdleOrphanHealthCheckAsync enqueues health check for orphan proxies with status idle.
+func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWithProgress) (*HCJob, error) {
+	store := GetJobStore()
+	total := 0
+	if counter, ok := hc.(idleOrphanCounter); ok {
+		if count, err := counter.CountOrphanIdleProxies(ctx); err == nil {
+			total = count
+		}
+	}
+
+	job := store.Create(HCJobKindIdle, 0, "Idle orphan proxies", "", 0, nil, func(store *HCJobStore, job *HCJob) {
+		results, err := hc.CheckOrphanIdleProxiesWithProgress(context.Background(), func(checked, active, failed int) {
+			store.Update(job.ID, func(j *HCJob) {
+				j.Progress = checked
+				j.Active = active
+				j.Failed = failed
+			})
+		})
 		if err != nil {
 			store.finishFailed(job.ID, err)
 			return

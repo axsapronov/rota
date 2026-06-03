@@ -237,6 +237,12 @@ class ApiClient {
     })
   }
 
+  async startIdleOrphanHealthCheck(): Promise<{ job_id: string; status: string; total: number }> {
+    return this.request("/api/v1/proxies/test/idle", {
+      method: "POST",
+    })
+  }
+
   async getProxyHealthCheckJob(jobId: string): Promise<HCJob> {
     return this.request(`/api/v1/proxies/test/${jobId}`)
   }

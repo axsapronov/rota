@@ -344,6 +344,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
 		r.Post("/proxies/test/bulk", s.proxyHandler.TestBulk)
 		r.Post("/proxies/test/global", s.proxyHandler.TestGlobal)
+		r.Post("/proxies/test/idle", s.proxyHandler.TestIdle)
 		r.Get("/proxies/test/{job_id}", s.proxyHandler.TestJobStatus)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
 		r.Post("/proxies/cleanup/run", s.RunProxyCleanupNow)

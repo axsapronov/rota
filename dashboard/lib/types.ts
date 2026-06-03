@@ -396,7 +396,7 @@ export type HCJobStatus = "pending" | "running" | "done" | "failed"
 
 export interface HCJob {
   id: string
-  kind?: "pool" | "proxy" | "orphan"
+  kind?: "pool" | "proxy" | "orphan" | "idle"
   pool_id: number
   pool_name: string
   status: HCJobStatus

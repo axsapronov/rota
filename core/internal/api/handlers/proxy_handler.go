@@ -20,6 +20,7 @@ import (
 type HealthChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
 	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
+	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int)) ([]models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -392,11 +393,33 @@ func (h *ProxyHandler) TestGlobal(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TestIdle enqueues health check for orphan proxies with status idle.
+//
+//	@Summary		Test idle orphan proxies
+//	@Description	Enqueue async health check for orphan proxies with status idle
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		202	{object}	map[string]interface{}
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/test/idle [post]
+func (h *ProxyHandler) TestIdle(w http.ResponseWriter, r *http.Request) {
+	job, err := services.RunIdleOrphanHealthCheckAsync(r.Context(), h.healthChecker)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to enqueue idle orphan health check")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
 // TestJobStatus returns status for a proxy test job.
 func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "job_id")
 	job, ok := services.GetJobStore().Get(jobID)
-	if !ok || (job.Kind != services.HCJobKindProxy && job.Kind != services.HCJobKindOrphan) {
+	if !ok || (job.Kind != services.HCJobKindProxy && job.Kind != services.HCJobKindOrphan && job.Kind != services.HCJobKindIdle) {
 		h.errorResponse(w, http.StatusNotFound, "Job not found")
 		return
 	}

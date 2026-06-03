@@ -193,6 +193,143 @@ func (h *HealthChecker) CountOrphanProxies(ctx context.Context) (int, error) {
 	return total, nil
 }
 
+// CountOrphanIdleProxies returns orphan proxies with status idle (not in any pool).
+func (h *HealthChecker) CountOrphanIdleProxies(ctx context.Context) (int, error) {
+	query := `
+		SELECT COUNT(*)
+		FROM proxies p
+		WHERE p.status = 'idle'
+		AND NOT EXISTS (
+			SELECT 1
+			FROM pool_proxies ppm
+			WHERE ppm.proxy_id = p.id
+		)
+	`
+	var total int
+	if err := h.proxyRepo.GetDB().Pool.QueryRow(ctx, query).Scan(&total); err != nil {
+		return 0, fmt.Errorf("failed to count orphan idle proxies: %w", err)
+	}
+	return total, nil
+}
+
+// ListOrphanIdleProxies loads orphan proxies with status idle.
+func (h *HealthChecker) ListOrphanIdleProxies(ctx context.Context) ([]*models.Proxy, error) {
+	query := `
+		SELECT
+			id, address, protocol, username, password, status,
+			requests, successful_requests, failed_requests,
+			avg_response_time, last_check, last_error, created_at, updated_at
+		FROM proxies p
+		WHERE p.status = 'idle'
+		AND NOT EXISTS (
+			SELECT 1
+			FROM pool_proxies ppm
+			WHERE ppm.proxy_id = p.id
+		)
+		ORDER BY address
+	`
+
+	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get orphan idle proxies: %w", err)
+	}
+	defer rows.Close()
+
+	proxies := make([]*models.Proxy, 0)
+	for rows.Next() {
+		var p models.Proxy
+		err := rows.Scan(
+			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
+			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
+			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan proxy: %w", err)
+		}
+		proxies = append(proxies, &p)
+	}
+	return proxies, nil
+}
+
+// CheckOrphanIdleProxiesWithProgress tests orphan idle proxies and reports progress.
+func (h *HealthChecker) CheckOrphanIdleProxiesWithProgress(
+	ctx context.Context,
+	onProgress func(checked, active, failed int),
+) ([]models.ProxyTestResult, error) {
+	settings, err := h.settingsRepo.GetAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load settings: %w", err)
+	}
+	h.settings = &settings.HealthCheck
+
+	proxies, err := h.ListOrphanIdleProxies(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(proxies) == 0 {
+		return []models.ProxyTestResult{}, nil
+	}
+
+	h.logger.Info("starting orphan idle health check", "proxy_count", len(proxies), "workers", h.settings.Workers)
+
+	workers := h.settings.Workers
+	if workers <= 0 {
+		workers = 20
+		h.logger.Warn("health check workers is non-positive, using fallback", "configured_workers", h.settings.Workers, "fallback_workers", workers)
+	}
+
+	wp := workerpool.New(workers)
+	results := make([]models.ProxyTestResult, len(proxies))
+	var statsMu sync.Mutex
+	checked := 0
+	active := 0
+	failed := 0
+
+	for i, proxy := range proxies {
+		idx := i
+		p := proxy
+		wp.Submit(func() {
+			result, err := h.CheckProxy(ctx, p, true)
+			statsMu.Lock()
+			defer statsMu.Unlock()
+			if err != nil {
+				h.logger.Error("orphan idle health check error",
+					"proxy_id", p.ID,
+					"proxy_address", p.Address,
+					"error", err,
+				)
+				results[idx] = models.ProxyTestResult{
+					ID:       p.ID,
+					Address:  p.Address,
+					Status:   "failed",
+					TestedAt: time.Now(),
+				}
+				errMsg := err.Error()
+				results[idx].Error = &errMsg
+				failed++
+			} else {
+				results[idx] = *result
+				if result.Status == "active" {
+					active++
+				} else {
+					failed++
+				}
+			}
+			checked++
+			if onProgress != nil {
+				onProgress(checked, active, failed)
+			}
+		})
+	}
+
+	wp.StopWait()
+
+	h.logger.Info("orphan idle health check completed", "proxy_count", len(proxies))
+
+	return results, nil
+}
+
 // CheckAllProxiesWithProgress tests orphan proxies and reports progress.
 func (h *HealthChecker) CheckAllProxiesWithProgress(
 	ctx context.Context,

@@ -316,6 +316,27 @@ export default function ProxiesPage() {
     }
   }
 
+  const handleRunIdleHealthCheck = async () => {
+    try {
+      setIsBulkTesting(true)
+      setHcRunning(true)
+      const started = await api.startIdleOrphanHealthCheck()
+      if (started.total === 0) {
+        setHcRunning(false)
+        setIsBulkTesting(false)
+        toast.info("No idle orphan proxies", "Nothing to check")
+        return
+      }
+      pollProxyHealthCheckJob(started.job_id)
+      toast.success("Idle orphan health check enqueued", `Job ${started.job_id.slice(0, 8)} · ${started.total} proxies`)
+    } catch (error) {
+      console.error("Failed to run idle orphan health check:", error)
+      setHcRunning(false)
+      setIsBulkTesting(false)
+      toast.error("Failed to run idle orphan health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
   React.useEffect(() => () => stopJobPoll(), [stopJobPoll])
 
   const handleBulkDelete = async () => {
@@ -833,6 +854,17 @@ export default function ProxiesPage() {
                       <Play className="mr-2 h-4 w-4" />
                     )}
                     Run health check
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={handleRunIdleHealthCheck}
+                    disabled={isBulkTesting || hcRunning}
+                  >
+                    {isBulkTesting ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="mr-2 h-4 w-4" />
+                    )}
+                    Run health check for idle
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
