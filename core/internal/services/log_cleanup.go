@@ -9,6 +9,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 )
 
 // LogCleanupService handles automatic log cleanup and retention
@@ -92,9 +93,11 @@ func (s *LogCleanupService) worker(ctx context.Context) {
 	for {
 		select {
 		case <-s.ticker.C:
-			if err := s.runCleanup(ctx); err != nil {
-				s.logger.Error("cleanup job failed", "error", err)
-			}
+			safeworker.Call(s.logger, "log_cleanup", func() {
+				if err := s.runCleanup(ctx); err != nil {
+					s.logger.Error("cleanup job failed", "error", err)
+				}
+			})
 		case <-s.stopChan:
 			s.logger.Info("log cleanup worker stopped")
 			return

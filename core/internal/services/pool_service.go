@@ -13,6 +13,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 	"github.com/gammazero/workerpool"
 )
 
@@ -54,8 +55,10 @@ func (ps *PoolService) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				ps.runScheduledHealthChecks(ctx)
-				ps.runAutoSync(ctx)
+				safeworker.Call(ps.logger, "pool_service", func() {
+					ps.runScheduledHealthChecks(ctx)
+					ps.runAutoSync(ctx)
+				})
 			case <-ctx.Done():
 				ps.logger.Info("pool service stopped")
 				return

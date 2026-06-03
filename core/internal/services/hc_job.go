@@ -3,12 +3,14 @@ package services
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/gammazero/workerpool"
 	"github.com/google/uuid"
 )
@@ -87,6 +89,8 @@ type HCJobStore struct {
 	jobs      map[string]*HCJob
 	queue     chan string
 	startOnce sync.Once
+	ctx       context.Context
+	logger    *logger.Logger
 }
 
 var globalJobStore = &HCJobStore{
@@ -99,14 +103,37 @@ func GetJobStore() *HCJobStore {
 }
 
 // Start initializes queue worker once.
-func (s *HCJobStore) Start(ctx context.Context, proxyRepo *repository.ProxyRepository, poolSvc *PoolService, hc proxyChecker) {
+func (s *HCJobStore) Start(ctx context.Context, log *logger.Logger, proxyRepo *repository.ProxyRepository, poolSvc *PoolService, hc proxyChecker) {
 	_ = proxyRepo
 	_ = poolSvc
 	_ = hc
 	s.startOnce.Do(func() {
+		s.ctx = ctx
+		s.logger = log
 		s.queue = make(chan string, 2048)
-		go s.consume(ctx)
+		go s.runConsumerLoop()
 	})
+}
+
+func (s *HCJobStore) runConsumerLoop() {
+	first := true
+	for {
+		if s.ctx.Err() != nil {
+			return
+		}
+		if !first {
+			s.requeueInterruptedJobs()
+		}
+		first = false
+		s.consume(s.ctx)
+		if s.ctx.Err() != nil {
+			return
+		}
+		if s.logger != nil {
+			s.logger.Warn("health check queue consumer exited unexpectedly, restarting", "delay", "1s")
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // Create registers a new queued job and returns it.
@@ -128,12 +155,47 @@ func (s *HCJobStore) Create(kind HCJobKind, poolID int, poolName, checkURL strin
 	s.jobs[job.ID] = job
 	s.mu.Unlock()
 
-	// Enqueue after registration.
-	if s.queue != nil {
-		s.queue <- job.ID
-	}
+	s.enqueue(job.ID)
 	go s.cleanup()
 	return job
+}
+
+func (s *HCJobStore) enqueue(jobID string) {
+	if s.queue == nil {
+		return
+	}
+	select {
+	case s.queue <- jobID:
+	default:
+		go func() {
+			select {
+			case s.queue <- jobID:
+			case <-s.ctx.Done():
+			}
+		}()
+	}
+}
+
+// requeueInterruptedJobs puts running jobs back on the queue after the consumer goroutine exits.
+func (s *HCJobStore) requeueInterruptedJobs() {
+	if s.queue == nil {
+		return
+	}
+	s.mu.RLock()
+	ids := make([]string, 0)
+	for id, j := range s.jobs {
+		if j.Status == HCJobRunning {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, id := range ids {
+		s.Update(id, func(j *HCJob) {
+			j.Status = HCJobPending
+		})
+		s.enqueue(id)
+	}
 }
 
 // Get returns a job by ID
@@ -235,6 +297,13 @@ func (s *HCJobStore) ListByKind(kind HCJobKind) []*HCJob {
 }
 
 func (s *HCJobStore) consume(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s.logger != nil {
+				s.logger.Error("health check queue consumer panicked", "error", r)
+			}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -247,9 +316,26 @@ func (s *HCJobStore) consume(ctx context.Context) {
 			s.Update(job.ID, func(j *HCJob) {
 				j.Status = HCJobRunning
 			})
-			job.run(s, job)
+			s.runJob(job)
 		}
 	}
+}
+
+func (s *HCJobStore) runJob(job *HCJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+			if s.logger != nil {
+				s.logger.Error("health check job panicked",
+					"job_id", job.ID,
+					"kind", job.Kind,
+					"error", r,
+				)
+			}
+			s.finishFailed(job.ID, err)
+		}
+	}()
+	job.run(s, job)
 }
 
 func (s *HCJobStore) finishFailed(jobID string, err error) {

@@ -20,6 +20,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -99,7 +100,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// putting dead proxies back into rotation. Pool-level health checks (cron-
 	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
-	services.GetJobStore().Start(context.Background(), proxyRepo, poolSvc, healthChecker)
+	services.GetJobStore().Start(context.Background(), log, proxyRepo, poolSvc, healthChecker)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
@@ -180,36 +181,38 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					startedAt := time.Now()
-					checkstats.RecordGlobalHealthCheckStart(startedAt)
-					job, err := services.RunOrphanHealthCheckAsync(context.Background(), healthChecker)
-					if err != nil {
-						checkstats.RecordGlobalHealthCheckFinish(startedAt, 0, err, runInterval)
-						continue
-					}
-					for {
-						select {
-						case <-ctx.Done():
+					safeworker.Call(log, "global_orphan_healthcheck", func() {
+						startedAt := time.Now()
+						checkstats.RecordGlobalHealthCheckStart(startedAt)
+						job, err := services.RunOrphanHealthCheckAsync(context.Background(), healthChecker)
+						if err != nil {
+							checkstats.RecordGlobalHealthCheckFinish(startedAt, 0, err, runInterval)
 							return
-						case <-time.After(500 * time.Millisecond):
+						}
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-time.After(500 * time.Millisecond):
+								statusJob, ok := services.GetJobStore().Get(job.ID)
+								if !ok {
+									return
+								}
+								if statusJob.Status == services.HCJobDone {
+									checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, nil, runInterval)
+									return
+								}
+								if statusJob.Status == services.HCJobFailed {
+									checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, errors.New(statusJob.Error), runInterval)
+									return
+								}
+							}
 							statusJob, ok := services.GetJobStore().Get(job.ID)
-							if !ok {
-								break
-							}
-							if statusJob.Status == services.HCJobDone {
-								checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, nil, runInterval)
-								break
-							}
-							if statusJob.Status == services.HCJobFailed {
-								checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, errors.New(statusJob.Error), runInterval)
-								break
+							if !ok || statusJob.Status == services.HCJobDone || statusJob.Status == services.HCJobFailed {
+								return
 							}
 						}
-						statusJob, ok := services.GetJobStore().Get(job.ID)
-						if !ok || statusJob.Status == services.HCJobDone || statusJob.Status == services.HCJobFailed {
-							break
-						}
-					}
+					})
 				}
 			}
 		}(runCtx, interval)

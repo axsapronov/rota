@@ -14,6 +14,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 )
 
 // parsedProxy holds the extracted fields from a single proxy list line.
@@ -154,7 +155,9 @@ func (s *SourceService) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				s.fetchDueSources(ctx)
+				safeworker.Call(s.logger, "source_fetcher", func() {
+					s.fetchDueSources(ctx)
+				})
 			case <-ctx.Done():
 				s.logger.Info("source service stopped")
 				return
@@ -330,19 +333,21 @@ func (s *SourceService) runGeoWorker(ctx context.Context) {
 			return
 		}
 
-		addrs := s.collectGeoBatch(ctx, batchSize)
-		if len(addrs) == 0 {
-			if n := s.drainGeoFromDB(); n > 0 {
-				s.logger.Info("geo backlog drain enqueued", "addresses", n)
-				continue
+		safeworker.Call(s.logger, "geo_worker", func() {
+			addrs := s.collectGeoBatch(ctx, batchSize)
+			if len(addrs) == 0 {
+				if n := s.drainGeoFromDB(); n > 0 {
+					s.logger.Info("geo backlog drain enqueued", "addresses", n)
+					return
+				}
+				s.logger.Debug("geo worker idle")
+				time.Sleep(geoIdleSleep)
+				return
 			}
-			s.logger.Debug("geo worker idle")
-			time.Sleep(geoIdleSleep)
-			continue
-		}
 
-		s.processGeoBatch(ctx, addrs)
-		s.scheduleSyncPoolsDebounced(ctx)
+			s.processGeoBatch(ctx, addrs)
+			s.scheduleSyncPoolsDebounced(ctx)
+		})
 	}
 }
 

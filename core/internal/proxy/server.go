@@ -10,6 +10,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 )
 
 // proxyRouter is the core HTTP handler that dispatches incoming proxy requests.
@@ -175,13 +176,15 @@ func (s *Server) startBackgroundTasks() {
 		for {
 			select {
 			case <-s.refreshTicker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := s.selector.Refresh(ctx); err != nil {
-					s.logger.Error("failed to refresh proxy list", "error", err)
-				} else {
-					s.logger.Debug("proxy list refreshed")
-				}
-				cancel()
+				safeworker.Call(s.logger, "proxy_list_refresh", func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := s.selector.Refresh(ctx); err != nil {
+						s.logger.Error("failed to refresh proxy list", "error", err)
+					} else {
+						s.logger.Debug("proxy list refreshed")
+					}
+				})
 			case <-s.stopChan:
 				return
 			}
@@ -194,8 +197,10 @@ func (s *Server) startBackgroundTasks() {
 		for {
 			select {
 			case <-s.cleanupTicker.C:
-				s.rateLimitMw.CleanupLimiters()
-				s.logger.Debug("cleaned up rate limiters")
+				safeworker.Call(s.logger, "rate_limit_cleanup", func() {
+					s.rateLimitMw.CleanupLimiters()
+					s.logger.Debug("cleaned up rate limiters")
+				})
 			case <-s.stopChan:
 				return
 			}
