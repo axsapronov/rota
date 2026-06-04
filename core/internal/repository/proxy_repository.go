@@ -327,17 +327,68 @@ func (r *ProxyRepository) CountFailedProxies(ctx context.Context) (int, error) {
 }
 
 // DeleteFailedProxiesBatch removes up to batchSize proxies with status failed.
+// Does not change schema: prefers SET LOCAL session_replication_role = replica so
+// DELETE on proxies skips FK cascade into proxy_requests (Timescale hypertable).
+// Falls back to explicit proxy_requests delete when the role cannot be set.
 func (r *ProxyRepository) DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error) {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
-	tag, err := r.db.Pool.Exec(ctx, `
-		DELETE FROM proxies
-		WHERE id IN (
-			SELECT id FROM proxies WHERE status = 'failed' LIMIT $1
-		)`, batchSize)
+
+	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to delete failed proxies batch: %w", err)
+		return 0, fmt.Errorf("failed to begin failed proxy delete transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM proxies
+		WHERE status = 'failed'
+		ORDER BY id
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED`, batchSize)
+	if err != nil {
+		return 0, fmt.Errorf("failed to select failed proxies batch: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("failed to scan proxy id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("failed to iterate failed proxies batch: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	skipRequestCascade := false
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err == nil {
+		skipRequestCascade = true
+	}
+
+	if !skipRequestCascade {
+		if _, err := tx.Exec(ctx, `DELETE FROM proxy_requests WHERE proxy_id = ANY($1)`, ids); err != nil {
+			return 0, fmt.Errorf("failed to delete proxy requests for batch: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM pool_proxies WHERE proxy_id = ANY($1)`, ids); err != nil {
+		return 0, fmt.Errorf("failed to delete pool proxy mappings: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM proxies WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete failed proxies: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("failed to commit failed proxy delete batch: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }
