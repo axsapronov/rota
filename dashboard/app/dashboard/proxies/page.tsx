@@ -125,6 +125,7 @@ export default function ProxiesPage() {
   const [isDragging, setIsDragging] = React.useState(false)
   const [isReloading, setIsReloading] = React.useState(false)
   const [isRunningCleanup, setIsRunningCleanup] = React.useState(false)
+  const [isRunningForceCleanup, setIsRunningForceCleanup] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
   const [isBulkTesting, setIsBulkTesting] = React.useState(false)
@@ -248,8 +249,21 @@ export default function ProxiesPage() {
           stopJobPoll()
           setHcRunning(false)
           setIsBulkTesting(false)
+          setIsRunningForceCleanup(false)
           if (job.status === "done") {
-            toast.success("Proxy test job completed", `${job.active} active, ${job.failed} failed`)
+            if (job.kind === "force_cleanup") {
+              const deleted = job.progress
+              toast.success("Run force cleanup completed", `Deleted ${deleted} failed proxies`)
+              try {
+                await api.reloadProxies()
+              } catch {
+                // list refresh still runs below
+              }
+            } else {
+              toast.success("Proxy test job completed", `${job.active} active, ${job.failed} failed`)
+            }
+          } else if (job.kind === "force_cleanup") {
+            toast.error("Run force cleanup failed", job.error || "Unknown error")
           } else {
             toast.error("Proxy test job failed", job.error || "Unknown error")
           }
@@ -259,6 +273,7 @@ export default function ProxiesPage() {
         stopJobPoll()
         setHcRunning(false)
         setIsBulkTesting(false)
+        setIsRunningForceCleanup(false)
       }
     }, 1000)
   }, [fetchProxies, stopJobPoll])
@@ -538,6 +553,27 @@ export default function ProxiesPage() {
       toast.error("Failed to run proxy cleanup", error instanceof Error ? error.message : "Unknown error")
     } finally {
       setIsRunningCleanup(false)
+    }
+  }
+
+  const handleRunForceCleanup = async () => {
+    try {
+      setIsRunningForceCleanup(true)
+      setHcRunning(true)
+      const started = await api.startForceCleanup()
+      if (started.total === 0) {
+        setHcRunning(false)
+        setIsRunningForceCleanup(false)
+        toast.info("No failed proxies", "Nothing to delete")
+        return
+      }
+      pollProxyHealthCheckJob(started.job_id)
+      toast.success("Run force cleanup enqueued", `Job ${started.job_id.slice(0, 8)} · ${started.total} proxies`)
+    } catch (error) {
+      console.error("Failed to run force cleanup:", error)
+      setHcRunning(false)
+      setIsRunningForceCleanup(false)
+      toast.error("Failed to run force cleanup", error instanceof Error ? error.message : "Unknown error")
     }
   }
 
@@ -845,6 +881,13 @@ export default function ProxiesPage() {
                     Run cleanup
                   </DropdownMenuItem>
                   <DropdownMenuItem
+                    onClick={handleRunForceCleanup}
+                    disabled={isRunningForceCleanup || hcRunning}
+                  >
+                    <Loader2 className={`mr-2 h-4 w-4 ${isRunningForceCleanup ? "animate-spin" : ""}`} />
+                    Run force cleanup
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     onClick={handleRunGlobalHealthCheck}
                     disabled={isBulkTesting || hcRunning}
                   >
@@ -931,11 +974,20 @@ export default function ProxiesPage() {
             {hcJob && hcJob.kind !== "orphan" && (
               <div className="rounded-md border p-3 text-sm">
                 <div className="flex items-center justify-between">
-                  <span className="font-medium">Healthcheck queue job</span>
+                  <span className="font-medium">
+                    {hcJob.kind === "force_cleanup" ? "Run force cleanup" : "Healthcheck queue job"}
+                  </span>
                   <Badge variant="outline" className="capitalize">{hcJob.status}</Badge>
                 </div>
                 <p className="text-muted-foreground mt-1">
-                  Progress: {hcJob.progress}/{hcJob.total} · Active: {hcJob.active} · Failed: {hcJob.failed}
+                  {hcJob.kind === "force_cleanup" ? (
+                    <>Deleted: {hcJob.progress}/{hcJob.total}</>
+                  ) : (
+                    <>
+                      Progress: {hcJob.progress}/{hcJob.total} · Active: {hcJob.active} · Failed:{" "}
+                      {hcJob.failed}
+                    </>
+                  )}
                 </p>
               </div>
             )}

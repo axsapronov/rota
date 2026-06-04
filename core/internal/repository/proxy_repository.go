@@ -316,6 +316,25 @@ func (r *ProxyRepository) DeleteDeadProxies(ctx context.Context, maxFailedDays i
 	return int(total), nil
 }
 
+// CountFailedProxies returns the number of proxies with status failed.
+func (r *ProxyRepository) CountFailedProxies(ctx context.Context) (int, error) {
+	var count int
+	err := r.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxies WHERE status = 'failed'`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count failed proxies: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteFailedProxies removes all proxies with status failed.
+func (r *ProxyRepository) DeleteFailedProxies(ctx context.Context) (int, error) {
+	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM proxies WHERE status = 'failed'`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete failed proxies: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // Update updates a proxy
 func (r *ProxyRepository) Update(ctx context.Context, id int, req models.UpdateProxyRequest) (*models.Proxy, error) {
 	tags := req.Tags

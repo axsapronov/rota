@@ -415,11 +415,33 @@ func (h *ProxyHandler) TestIdle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ForceCleanup enqueues async deletion of all proxies with status failed.
+//
+//	@Summary		Run force cleanup
+//	@Description	Enqueue async job to delete all proxies with status failed
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		202	{object}	map[string]interface{}
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/cleanup/force [post]
+func (h *ProxyHandler) ForceCleanup(w http.ResponseWriter, r *http.Request) {
+	job, err := services.RunForceCleanupAsync(r.Context(), h.proxyRepo)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to enqueue force cleanup")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
 // TestJobStatus returns status for a proxy test job.
 func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "job_id")
 	job, ok := services.GetJobStore().Get(jobID)
-	if !ok || (job.Kind != services.HCJobKindProxy && job.Kind != services.HCJobKindOrphan && job.Kind != services.HCJobKindIdle) {
+	if !ok || (job.Kind != services.HCJobKindProxy && job.Kind != services.HCJobKindOrphan && job.Kind != services.HCJobKindIdle && job.Kind != services.HCJobKindForceCleanup) {
 		h.errorResponse(w, http.StatusNotFound, "Job not found")
 		return
 	}

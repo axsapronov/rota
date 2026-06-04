@@ -277,6 +277,12 @@ class ApiClient {
     })
   }
 
+  async startForceCleanup(): Promise<{ job_id: string; status: string; total: number }> {
+    return this.request("/api/v1/proxies/cleanup/force", {
+      method: "POST",
+    })
+  }
+
   // Logs
   async getLogs(params?: {
     page?: number

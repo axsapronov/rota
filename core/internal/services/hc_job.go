@@ -29,11 +29,17 @@ const (
 type HCJobKind string
 
 const (
-	HCJobKindPool   HCJobKind = "pool"
-	HCJobKindProxy  HCJobKind = "proxy"
-	HCJobKindOrphan HCJobKind = "orphan"
-	HCJobKindIdle   HCJobKind = "idle"
+	HCJobKindPool         HCJobKind = "pool"
+	HCJobKindProxy        HCJobKind = "proxy"
+	HCJobKindOrphan       HCJobKind = "orphan"
+	HCJobKindIdle         HCJobKind = "idle"
+	HCJobKindForceCleanup HCJobKind = "force_cleanup"
 )
+
+type failedProxyRepo interface {
+	CountFailedProxies(ctx context.Context) (int, error)
+	DeleteFailedProxies(ctx context.Context) (int, error)
+}
 
 type proxyChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
@@ -553,6 +559,46 @@ func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWith
 			j.Active = active
 			j.Failed = failed
 			j.Results = results
+		})
+		store.finishDone(job.ID)
+	})
+	store.Update(job.ID, func(j *HCJob) {
+		j.Total = total
+	})
+	return job, nil
+}
+
+// RunForceCleanupAsync enqueues deletion of all proxies with status failed.
+func RunForceCleanupAsync(ctx context.Context, proxyRepo failedProxyRepo) (*HCJob, error) {
+	return runForceCleanupAsyncOn(GetJobStore(), ctx, proxyRepo)
+}
+
+func runForceCleanupAsyncOn(store *HCJobStore, ctx context.Context, proxyRepo failedProxyRepo) (*HCJob, error) {
+	total := 0
+	if proxyRepo != nil {
+		if count, err := proxyRepo.CountFailedProxies(ctx); err == nil {
+			total = count
+		}
+	}
+
+	job := store.Create(HCJobKindForceCleanup, 0, "Run force cleanup", "", 0, nil, func(store *HCJobStore, job *HCJob) {
+		if proxyRepo == nil {
+			store.finishFailed(job.ID, fmt.Errorf("proxy repository not available"))
+			return
+		}
+		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		deleted, err := proxyRepo.DeleteFailedProxies(dbCtx)
+		if err != nil {
+			store.finishFailed(job.ID, err)
+			return
+		}
+		store.Update(job.ID, func(j *HCJob) {
+			j.Progress = deleted
+			if j.Total < deleted {
+				j.Total = deleted
+			}
 		})
 		store.finishDone(job.ID)
 	})
