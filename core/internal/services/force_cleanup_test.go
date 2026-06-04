@@ -8,18 +8,35 @@ import (
 )
 
 type mockFailedProxyRepo struct {
-	count   int
-	countErr error
-	deleteN int
-	deleteErr error
+	count      int
+	countErr   error
+	deleteN    int
+	remaining  int
+	deleteErr  error
+	batchCalls int
 }
 
 func (m *mockFailedProxyRepo) CountFailedProxies(ctx context.Context) (int, error) {
 	return m.count, m.countErr
 }
 
-func (m *mockFailedProxyRepo) DeleteFailedProxies(ctx context.Context) (int, error) {
-	return m.deleteN, m.deleteErr
+func (m *mockFailedProxyRepo) DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error) {
+	m.batchCalls++
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	if m.remaining == 0 {
+		m.remaining = m.deleteN
+	}
+	if m.remaining <= 0 {
+		return 0, nil
+	}
+	n := m.remaining
+	if n > batchSize {
+		n = batchSize
+	}
+	m.remaining -= n
+	return n, nil
 }
 
 func TestRunForceCleanupAsync_zeroFailedCompletesImmediately(t *testing.T) {
@@ -92,6 +109,44 @@ func TestRunForceCleanupAsync_deletesFailedProxies(t *testing.T) {
 		select {
 		case <-deadline:
 			t.Fatalf("job stuck in %s", j.Status)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func TestRunForceCleanupAsync_deletesInBatches(t *testing.T) {
+	store := &HCJobStore{jobs: make(map[string]*HCJob)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.Start(ctx, nil, nil, nil, nil)
+
+	repo := &mockFailedProxyRepo{count: 12_000, deleteN: 12_000}
+	job, err := runForceCleanupAsyncOn(store, ctx, repo)
+	if err != nil {
+		t.Fatalf("RunForceCleanupAsync: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		j, ok := store.Get(job.ID)
+		if !ok {
+			t.Fatal("job missing")
+		}
+		if j.Status == HCJobDone {
+			if j.Progress != 12_000 {
+				t.Fatalf("progress = %d, want 12000", j.Progress)
+			}
+			if repo.batchCalls < 3 {
+				t.Fatalf("batchCalls = %d, want at least 3", repo.batchCalls)
+			}
+			return
+		}
+		if j.Status == HCJobFailed {
+			t.Fatalf("job failed: %s", j.Error)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("job stuck in %s progress=%d", j.Status, j.Progress)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

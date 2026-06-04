@@ -326,11 +326,18 @@ func (r *ProxyRepository) CountFailedProxies(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// DeleteFailedProxies removes all proxies with status failed.
-func (r *ProxyRepository) DeleteFailedProxies(ctx context.Context) (int, error) {
-	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM proxies WHERE status = 'failed'`)
+// DeleteFailedProxiesBatch removes up to batchSize proxies with status failed.
+func (r *ProxyRepository) DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error) {
+	if batchSize <= 0 {
+		batchSize = 5000
+	}
+	tag, err := r.db.Pool.Exec(ctx, `
+		DELETE FROM proxies
+		WHERE id IN (
+			SELECT id FROM proxies WHERE status = 'failed' LIMIT $1
+		)`, batchSize)
 	if err != nil {
-		return 0, fmt.Errorf("failed to delete failed proxies: %w", err)
+		return 0, fmt.Errorf("failed to delete failed proxies batch: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }

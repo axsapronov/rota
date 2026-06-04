@@ -36,9 +36,11 @@ const (
 	HCJobKindForceCleanup HCJobKind = "force_cleanup"
 )
 
+const forceCleanupBatchSize = 5000
+
 type failedProxyRepo interface {
 	CountFailedProxies(ctx context.Context) (int, error)
-	DeleteFailedProxies(ctx context.Context) (int, error)
+	DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error)
 }
 
 type proxyChecker interface {
@@ -586,20 +588,36 @@ func runForceCleanupAsyncOn(store *HCJobStore, ctx context.Context, proxyRepo fa
 			store.finishFailed(job.ID, fmt.Errorf("proxy repository not available"))
 			return
 		}
-		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		deleted, err := proxyRepo.DeleteFailedProxies(dbCtx)
-		if err != nil {
-			store.finishFailed(job.ID, err)
-			return
-		}
-		store.Update(job.ID, func(j *HCJob) {
-			j.Progress = deleted
-			if j.Total < deleted {
-				j.Total = deleted
+		dbCtx := context.Background()
+		var totalDeleted int
+		for {
+			deleted, err := proxyRepo.DeleteFailedProxiesBatch(dbCtx, forceCleanupBatchSize)
+			if err != nil {
+				store.finishFailed(job.ID, err)
+				return
 			}
-		})
+			if deleted == 0 {
+				break
+			}
+			totalDeleted += deleted
+			progress := totalDeleted
+			store.Update(job.ID, func(j *HCJob) {
+				j.Progress = progress
+				if j.Total < progress {
+					j.Total = progress
+				}
+			})
+			if store.logger != nil {
+				store.logger.Info("force cleanup batch completed",
+					"job_id", job.ID,
+					"batch_deleted", deleted,
+					"total_deleted", totalDeleted,
+				)
+			}
+			if deleted < forceCleanupBatchSize {
+				break
+			}
+		}
 		store.finishDone(job.ID)
 	})
 	store.Update(job.ID, func(j *HCJob) {
