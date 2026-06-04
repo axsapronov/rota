@@ -36,7 +36,7 @@ const (
 	HCJobKindForceCleanup HCJobKind = "force_cleanup"
 )
 
-const forceCleanupBatchSize = 5000
+const forceCleanupBatchSize = 100
 
 type failedProxyRepo interface {
 	CountFailedProxies(ctx context.Context) (int, error)

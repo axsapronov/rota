@@ -329,7 +329,7 @@ func (r *ProxyRepository) CountFailedProxies(ctx context.Context) (int, error) {
 // DeleteFailedProxiesBatch removes up to batchSize proxies with status failed.
 func (r *ProxyRepository) DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error) {
 	if batchSize <= 0 {
-		batchSize = 5000
+		batchSize = 100
 	}
 	tag, err := r.db.Pool.Exec(ctx, `
 		DELETE FROM proxies

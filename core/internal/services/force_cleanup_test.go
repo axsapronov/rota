@@ -12,6 +12,7 @@ type mockFailedProxyRepo struct {
 	countErr   error
 	deleteN    int
 	remaining  int
+	initialized bool
 	deleteErr  error
 	batchCalls int
 }
@@ -25,7 +26,8 @@ func (m *mockFailedProxyRepo) DeleteFailedProxiesBatch(ctx context.Context, batc
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
 	}
-	if m.remaining == 0 {
+	if !m.initialized {
+		m.initialized = true
 		m.remaining = m.deleteN
 	}
 	if m.remaining <= 0 {
@@ -120,7 +122,7 @@ func TestRunForceCleanupAsync_deletesInBatches(t *testing.T) {
 	defer cancel()
 	store.Start(ctx, nil, nil, nil, nil)
 
-	repo := &mockFailedProxyRepo{count: 12_000, deleteN: 12_000}
+	repo := &mockFailedProxyRepo{count: 250, deleteN: 250}
 	job, err := runForceCleanupAsyncOn(store, ctx, repo)
 	if err != nil {
 		t.Fatalf("RunForceCleanupAsync: %v", err)
@@ -133,8 +135,8 @@ func TestRunForceCleanupAsync_deletesInBatches(t *testing.T) {
 			t.Fatal("job missing")
 		}
 		if j.Status == HCJobDone {
-			if j.Progress != 12_000 {
-				t.Fatalf("progress = %d, want 12000", j.Progress)
+			if j.Progress != 250 {
+				t.Fatalf("progress = %d, want 250", j.Progress)
 			}
 			if repo.batchCalls < 3 {
 				t.Fatalf("batchCalls = %d, want at least 3", repo.batchCalls)
