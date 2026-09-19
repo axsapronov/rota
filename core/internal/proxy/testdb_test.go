@@ -66,11 +66,62 @@ func openTestDB(t *testing.T) *testDB {
 		t.Fatalf("create proxies table: %v", err)
 	}
 
+	// pool_proxies: needed for the orphan (NOT EXISTS) health-check filter.
+	const createPoolProxies = `
+		CREATE TABLE IF NOT EXISTS pool_proxies (
+			pool_id  INTEGER NOT NULL,
+			proxy_id INTEGER NOT NULL,
+			added_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (pool_id, proxy_id)
+		);
+	`
+	if _, err := pool.Exec(ctx, createPoolProxies); err != nil {
+		t.Fatalf("create pool_proxies table: %v", err)
+	}
+
+	// settings: needed so HealthChecker can load health-check settings.
+	const createSettings = `
+		CREATE TABLE IF NOT EXISTS settings (
+			key        VARCHAR(255) PRIMARY KEY,
+			value      JSONB NOT NULL,
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
+	`
+	if _, err := pool.Exec(ctx, createSettings); err != nil {
+		t.Fatalf("create settings table: %v", err)
+	}
+
 	repo := repository.NewProxyRepository(&database.DB{Pool: pool})
 	return &testDB{
 		Pool:    pool,
 		Repo:    repo,
 		Tracker: NewUsageTracker(repo),
+	}
+}
+
+// insertTestPoolMembership links a proxy to a pool in pool_proxies.
+func insertTestPoolMembership(t *testing.T, pool *pgxpool.Pool, poolID, proxyID int) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO pool_proxies (pool_id, proxy_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		poolID, proxyID,
+	); err != nil {
+		t.Fatalf("insert pool membership: %v", err)
+	}
+}
+
+// seedHealthCheckSetting ensures a healthcheck settings row exists so
+// HealthChecker.GetAll succeeds. The URL points at a dead port so checks fail
+// fast. Idempotent (ON CONFLICT DO NOTHING).
+func seedHealthCheckSetting(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	const seed = `
+		INSERT INTO settings (key, value)
+		VALUES ('healthcheck', '{"timeout": 1, "workers": 2, "url": "http://127.0.0.1:1", "status": 200, "headers": []}'::jsonb)
+		ON CONFLICT (key) DO NOTHING
+	`
+	if _, err := pool.Exec(context.Background(), seed); err != nil {
+		t.Fatalf("seed healthcheck setting: %v", err)
 	}
 }
 

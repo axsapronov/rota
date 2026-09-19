@@ -126,6 +126,10 @@ export interface Settings {
     headers: string[]
     strict_tls: boolean
   }
+  global_health_check: {
+    enabled: boolean
+    interval_minutes: number
+  }
   log_retention: {
     enabled: boolean
     retention_days: number

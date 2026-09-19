@@ -131,8 +131,8 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"timeout":              90,
 			"retries":              3,
 			"allowed_protocols":    []string{"http", "https", "socks5"}, // All protocols allowed by default
-			"max_response_time":    0,          // 0 means no limit
-			"min_success_rate":     0.0,        // 0 means no minimum
+			"max_response_time":    0,                                   // 0 means no limit
+			"min_success_rate":     0.0,                                 // 0 means no minimum
 		},
 		"rate_limit": {
 			"enabled":      false,
@@ -145,6 +145,10 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"url":     "https://api.ipify.org",
 			"status":  200,
 			"headers": []string{"User-Agent: Rota-HealthCheck/1.0"},
+		},
+		"global_health_check": {
+			"enabled":          true,
+			"interval_minutes": 30,
 		},
 		"log_retention": {
 			"enabled":                true,

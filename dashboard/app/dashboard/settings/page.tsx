@@ -367,6 +367,29 @@ export default function SettingsPage() {
         </div>
       </Section>
 
+      {/* Global health check */}
+      <Section
+        title="Global health check"
+        description="Periodically check orphan proxies that are not attached to any pool, so dead ones are marked before a pool needs them."
+      >
+        <div className="max-w-2xl">
+          <SwitchRow
+            id="global-healthcheck-enabled"
+            label="Check orphan proxies automatically"
+            hint="Schedules a health check for proxies no pool references."
+            checked={settings.global_health_check?.enabled ?? true}
+            onChange={(v) => patch("global_health_check", { enabled: v })}
+          />
+        </div>
+        {(settings.global_health_check?.enabled ?? true) && (
+          <div className={cn(grid, "mt-4")}>
+            <Field id="global-healthcheck-interval" label="Interval (minutes)" hint="1–1440. How often the orphan-proxy check runs.">
+              <Input id="global-healthcheck-interval" type="number" min={1} max={1440} value={settings.global_health_check?.interval_minutes ?? 30} onChange={(e) => patch("global_health_check", { interval_minutes: num(e.target.value, 30) })} />
+            </Field>
+          </div>
+        )}
+      </Section>
+
       {/* Log retention */}
       <Section title="Log retention" description="Automatic cleanup of proxy request logs in TimescaleDB.">
         <div className="max-w-2xl">
