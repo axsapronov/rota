@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"io"
 	"math/big"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -294,4 +296,85 @@ func TestCheckProxyPeriodicConsecutive(t *testing.T) {
 	pollProxyRow(t, db.Pool, id, func(r proxyRow) bool {
 		return r.Status == "active" && r.FailedRequests == 0
 	})
+}
+
+// uniqueProxyAddress returns an address unlikely to collide with rows left by
+// other tests in the shared ROTA_TEST_DSN database.
+func uniqueProxyAddress(t *testing.T, port int) string {
+	t.Helper()
+	return fmt.Sprintf("10.99.%d.%d:%d",
+		mrand.Intn(254)+1, mrand.Intn(254)+1, port)
+}
+
+// TestOrphanHealthCheckFilter verifies the global health check only targets
+// orphan proxies (not attached to any pool): the orphan is counted and checked,
+// the pool proxy is excluded. Counts use a before/after delta so other rows in
+// the shared test DB don't affect the assertion.
+func TestOrphanHealthCheckFilter(t *testing.T) {
+	db := openTestDB(t)
+	seedHealthCheckSetting(t, db.Pool)
+
+	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: db.Pool})
+	h := &HealthChecker{
+		proxyRepo:    db.Repo,
+		settingsRepo: settingsRepo,
+		tracker:      db.Tracker,
+		logger:       logger.New("error"),
+	}
+
+	ctx := context.Background()
+
+	baseOrphan, err := h.CountOrphanProxies(ctx)
+	if err != nil {
+		t.Fatalf("baseline CountOrphanProxies: %v", err)
+	}
+	baseIdle, err := h.CountOrphanIdleProxies(ctx)
+	if err != nil {
+		t.Fatalf("baseline CountOrphanIdleProxies: %v", err)
+	}
+
+	orphanID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8080), "idle")
+	poolProxyID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8081), "idle")
+	insertTestPoolMembership(t, db.Pool, 999, poolProxyID)
+	t.Cleanup(func() {
+		db.Pool.Exec(context.Background(),
+			`DELETE FROM proxies WHERE id IN ($1, $2)`, orphanID, poolProxyID)
+	})
+
+	afterOrphan, err := h.CountOrphanProxies(ctx)
+	if err != nil {
+		t.Fatalf("CountOrphanProxies: %v", err)
+	}
+	if afterOrphan-baseOrphan != 1 {
+		t.Fatalf("orphan count delta = %d, want 1 (only the orphan)", afterOrphan-baseOrphan)
+	}
+
+	afterIdle, err := h.CountOrphanIdleProxies(ctx)
+	if err != nil {
+		t.Fatalf("CountOrphanIdleProxies: %v", err)
+	}
+	if afterIdle-baseIdle != 1 {
+		t.Fatalf("idle orphan count delta = %d, want 1 (orphan is idle, pool proxy is excluded)", afterIdle-baseIdle)
+	}
+
+	// CheckAllProxiesWithProgress must check the orphan and skip the pool proxy.
+	results, err := h.CheckAllProxiesWithProgress(ctx, nil, false)
+	if err != nil {
+		t.Fatalf("CheckAllProxiesWithProgress: %v", err)
+	}
+	foundOrphan, foundPool := false, false
+	for _, r := range results {
+		if r.ID == orphanID {
+			foundOrphan = true
+		}
+		if r.ID == poolProxyID {
+			foundPool = true
+		}
+	}
+	if !foundOrphan {
+		t.Fatal("orphan proxy missing from CheckAllProxiesWithProgress results")
+	}
+	if foundPool {
+		t.Fatal("pool proxy must not be checked by CheckAllProxiesWithProgress")
+	}
 }

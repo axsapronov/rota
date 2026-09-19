@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -14,22 +15,29 @@ import (
 
 // MetricsHandler handles system metrics requests
 type MetricsHandler struct {
-	logger *logger.Logger
+	logger           *logger.Logger
+	hcProvider       func() checkstats.Snapshot
+	globalHCProvider func() checkstats.GlobalHealthCheckSnapshot
 }
 
-// NewMetricsHandler creates a new metrics handler
-func NewMetricsHandler(log *logger.Logger) *MetricsHandler {
+// NewMetricsHandler creates a new metrics handler. The provider functions are
+// optional (nil-safe) and supply the health-check stats sections.
+func NewMetricsHandler(log *logger.Logger, hcProvider func() checkstats.Snapshot, globalHCProvider func() checkstats.GlobalHealthCheckSnapshot) *MetricsHandler {
 	return &MetricsHandler{
-		logger: log,
+		logger:           log,
+		hcProvider:       hcProvider,
+		globalHCProvider: globalHCProvider,
 	}
 }
 
 // SystemMetrics represents system resource metrics
 type SystemMetrics struct {
-	Memory  MemoryMetrics  `json:"memory"`
-	CPU     CPUMetrics     `json:"cpu"`
-	Disk    DiskMetrics    `json:"disk"`
-	Runtime RuntimeMetrics `json:"runtime"`
+	Memory            MemoryMetrics                         `json:"memory"`
+	CPU               CPUMetrics                            `json:"cpu"`
+	Disk              DiskMetrics                           `json:"disk"`
+	Runtime           RuntimeMetrics                        `json:"runtime"`
+	HealthCheck       *checkstats.Snapshot                  `json:"health_check,omitempty"`
+	GlobalHealthCheck *checkstats.GlobalHealthCheckSnapshot `json:"global_health_check,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -64,6 +72,7 @@ type RuntimeMetrics struct {
 }
 
 // GetSystemMetrics retrieves current system metrics
+//
 //	@Summary		System metrics
 //	@Description	Get current system resource metrics (CPU, memory, disk, runtime)
 //	@Tags			metrics
@@ -153,6 +162,16 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 		GCPauseCount: m.NumGC,
 		MemAlloc:     m.Alloc,
 		MemSys:       m.Sys,
+	}
+
+	// Health-check metrics (rolling window + global orphan scheduler snapshot).
+	if h.hcProvider != nil {
+		hc := h.hcProvider()
+		metrics.HealthCheck = &hc
+	}
+	if h.globalHCProvider != nil {
+		globalHC := h.globalHCProvider()
+		metrics.GlobalHealthCheck = &globalHC
 	}
 
 	return metrics

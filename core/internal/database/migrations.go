@@ -546,6 +546,18 @@ var migrations = []Migration{
 			WHERE key = 'healthcheck';
 		`,
 	},
+	{
+		Version:     25,
+		Description: "Seed global_health_check setting (enabled, 30 min) for existing installations",
+		Up: `
+			INSERT INTO settings (key, value, updated_at) VALUES
+			('global_health_check', '{"enabled": true, "interval_minutes": 30}'::jsonb, NOW())
+			ON CONFLICT (key) DO NOTHING;
+		`,
+		Down: `
+			DELETE FROM settings WHERE key = 'global_health_check';
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

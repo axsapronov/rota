@@ -765,6 +765,67 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* Global Health Check Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              <CardTitle>Global Health Check</CardTitle>
+            </div>
+            <CardDescription>
+              Periodically check orphan proxies (not attached to any pool)
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="global-healthcheck-enabled">Enable Global Health Check</Label>
+                <p className="text-xs text-muted-foreground">
+                  Schedule health checks for orphan proxies
+                </p>
+              </div>
+              <Switch
+                id="global-healthcheck-enabled"
+                checked={settings.global_health_check?.enabled ?? true}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    global_health_check: {
+                      ...settings.global_health_check,
+                      enabled: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+
+            {(settings.global_health_check?.enabled ?? true) && (
+              <div className="space-y-2">
+                <Label htmlFor="global-healthcheck-interval">Interval (minutes)</Label>
+                <Input
+                  id="global-healthcheck-interval"
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={settings.global_health_check?.interval_minutes ?? 30}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      global_health_check: {
+                        ...settings.global_health_check,
+                        interval_minutes: parseInt(e.target.value) || 30,
+                      },
+                    })
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  How often to run the orphan proxy health check (1–1440 minutes)
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Log Retention Settings */}
         <Card>
           <CardHeader>

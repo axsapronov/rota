@@ -12,13 +12,18 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 )
 
-// HealthChecker interface for testing proxies
+// HealthChecker interface for testing proxies. The orphan methods are declared
+// here only so the concrete checker can be handed to the services layer, which
+// performs the capability type-assertions itself (see hc_job.go).
 type HealthChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
+	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
+	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -427,6 +432,79 @@ func (h *ProxyHandler) Test(w http.ResponseWriter, r *http.Request) {
 	)
 
 	h.jsonResponse(w, http.StatusOK, result)
+}
+
+// TestGlobal enqueues an async health check for all orphan proxies (those not
+// attached to any pool) and returns the job immediately.
+//
+//	@Summary		Test all orphan proxies
+//	@Description	Enqueue async health check for orphan (pool-less) proxies
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		202	{object}	map[string]interface{}	"Job accepted"
+//	@Failure		429	{object}	models.ErrorResponse	"Health check queue is full"
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/test/global [post]
+func (h *ProxyHandler) TestGlobal(w http.ResponseWriter, r *http.Request) {
+	// User-initiated: apply each result to the proxy status immediately.
+	job, err := services.RunOrphanHealthCheckAsync(r.Context(), h.healthChecker, true)
+	if err != nil {
+		h.logger.Warn("failed to enqueue global health check", "error", err)
+		h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
+// TestIdle enqueues an async health check for orphan proxies with status idle.
+//
+//	@Summary		Test idle orphan proxies
+//	@Description	Enqueue async health check for orphan proxies with status idle
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		202	{object}	map[string]interface{}	"Job accepted"
+//	@Failure		429	{object}	models.ErrorResponse	"Health check queue is full"
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/test/idle [post]
+func (h *ProxyHandler) TestIdle(w http.ResponseWriter, r *http.Request) {
+	job, err := services.RunIdleOrphanHealthCheckAsync(r.Context(), h.healthChecker, true)
+	if err != nil {
+		h.logger.Warn("failed to enqueue idle orphan health check", "error", err)
+		h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
+// TestJobStatus returns the current status of a proxy test job.
+//
+//	@Summary		Proxy test job status
+//	@Description	Get status of an async proxy test job
+//	@Tags			proxies
+//	@Produce		json
+//	@Param			job_id	path		string	true	"Job ID"
+//	@Success		200	{object}	map[string]interface{}	"Job status"
+//	@Failure		404	{object}	models.ErrorResponse
+//	@Router			/proxies/test/{job_id} [get]
+func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "job_id")
+	job, ok := services.GetJobStore().Get(jobID)
+	if !ok || (job.Kind != services.HCJobKindProxy &&
+		job.Kind != services.HCJobKindOrphan &&
+		job.Kind != services.HCJobKindIdle &&
+		job.Kind != services.HCJobKindForceCleanup) {
+		h.errorResponse(w, http.StatusNotFound, "Job not found")
+		return
+	}
+	h.jsonResponse(w, http.StatusOK, job)
 }
 
 // Export handles proxy export

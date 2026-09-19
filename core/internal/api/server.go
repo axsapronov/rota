@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/proxy"
@@ -122,7 +125,10 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log, nil) // onUpdate set below
 	settingsHandler.SetGeoIPService(geoSvc)
 	websocketHandler := handlers.NewWebSocketHandler(dashboardRepo, proxyRepo, logRepo, log, cfg.CORSAllowedOrigins)
-	metricsHandler := handlers.NewMetricsHandler(log)
+	metricsHandler := handlers.NewMetricsHandler(log,
+		func() checkstats.Snapshot { return checkstats.BuildSnapshot(services.GetJobStore().QueuePending()) },
+		checkstats.GetGlobalHealthCheckSnapshot,
+	)
 	documentationHandler := handlers.NewDocumentationHandler()
 	sourceHandler := handlers.NewSourceHandler(sourceRepo, sourceSvc, log)
 	poolHandler := handlers.NewPoolHandler(poolRepo, poolSvc, log)
@@ -162,7 +168,104 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		userHandler:          userHandler,
 	}
 
-	// Wire settings reload: when settings are updated via API, reload proxy server & GeoIP service
+	// Background services run under a cancellable context so they can be
+	// stopped on shutdown before the DB is closed (AUD-6). Their loops all
+	// select on ctx.Done(). The global health-check scheduler is driven from
+	// this same context so it stops on shutdown too.
+	svcCtx, cancelServices := context.WithCancel(context.Background())
+	s.cancelServices = cancelServices
+
+	// Start the shared health-check job queue consumer; it lives for the
+	// service context's lifetime (AUD-6).
+	services.GetJobStore().Start(svcCtx, log)
+
+	// Global (orphan) health-check scheduler, driven by persisted settings.
+	// Changing the settings cancels the previous ticker before starting a new
+	// one, so a settings edit restarts the schedule without leaking goroutines
+	// or double-running.
+	var globalHCMu sync.Mutex
+	var globalHCCancel context.CancelFunc
+	applyGlobalHealthCheckSettings := func(enabled bool, intervalMinutes int) {
+		if intervalMinutes <= 0 {
+			intervalMinutes = 30
+		}
+		interval := time.Duration(intervalMinutes) * time.Minute
+
+		globalHCMu.Lock()
+		defer globalHCMu.Unlock()
+
+		if globalHCCancel != nil {
+			globalHCCancel()
+			globalHCCancel = nil
+		}
+
+		if !enabled {
+			checkstats.SetGlobalHealthCheckConfig(false, 0)
+			log.Info("orphan periodic health check disabled")
+			return
+		}
+
+		checkstats.SetGlobalHealthCheckConfig(true, interval)
+		runCtx, cancel := context.WithCancel(svcCtx)
+		globalHCCancel = cancel
+
+		go func(runCtx context.Context, runInterval time.Duration) {
+			ticker := time.NewTicker(runInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					// Inline defer/recover (equivalent of safeworker.Call, which
+					// is not available in this branch): a panicking tick must not
+					// take down the scheduler.
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								log.Error("global orphan health check tick panicked", "error", r)
+							}
+						}()
+						startedAt := time.Now()
+						checkstats.RecordGlobalHealthCheckStart(startedAt)
+						// immediate=false: periodic runs use consecutive-failure
+						// hysteresis (RecordHealthCheck), not immediate flips.
+						job, err := services.RunOrphanHealthCheckAsync(context.Background(), healthChecker, false)
+						if err != nil {
+							checkstats.RecordGlobalHealthCheckFinish(startedAt, 0, err, runInterval)
+							return
+						}
+						// Poll the job until it finishes; ticks that fire while a
+						// run is in flight collapse into this wait (no overlap).
+						for {
+							select {
+							case <-runCtx.Done():
+								return
+							case <-time.After(500 * time.Millisecond):
+								statusJob, ok := services.GetJobStore().Get(job.ID)
+								if !ok {
+									return
+								}
+								if statusJob.Status == services.HCJobDone {
+									checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, nil, runInterval)
+									return
+								}
+								if statusJob.Status == services.HCJobFailed {
+									checkstats.RecordGlobalHealthCheckFinish(startedAt, statusJob.Progress, errors.New(statusJob.Error), runInterval)
+									return
+								}
+							}
+						}
+					}()
+				}
+			}
+		}(runCtx, interval)
+
+		log.Info("orphan periodic health check enabled", "interval_minutes", intervalMinutes)
+	}
+
+	// Wire settings reload: when settings are updated via API, reload proxy
+	// server, GeoIP service, and the global health-check scheduler.
 	settingsHandler.SetOnUpdate(func(ctx context.Context) {
 		if err := geoSvc.ReloadSettings(ctx); err != nil {
 			log.Error("failed to reload geoip settings after update", "error", err)
@@ -174,28 +277,31 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 				log.Info("proxy settings reloaded after update")
 			}
 		}
+		if cfg, err := settingsRepo.GetAll(ctx); err != nil {
+			log.Error("failed to reload global healthcheck settings after update", "error", err)
+		} else {
+			applyGlobalHealthCheckSettings(cfg.GlobalHealthCheck.Enabled, cfg.GlobalHealthCheck.IntervalMinutes)
+		}
 	})
 
 	// Alert watcher + proxy cleanup services
 	alertWatcher := services.NewAlertWatcher(poolRepo, log)
 	cleanupSvc := services.NewProxyCleanupService(proxyRepo, settingsRepo, log)
 
-	// Start background services under a cancellable context so they can be
-	// stopped on shutdown before the DB is closed (AUD-6). Their loops all
-	// select on ctx.Done().
-	svcCtx, cancelServices := context.WithCancel(context.Background())
-	s.cancelServices = cancelServices
 	geoSvc.StartAutoUpdate(svcCtx)
 	sourceSvc.Start(svcCtx)
 	poolSvc.Start(svcCtx)
 	alertWatcher.Start(svcCtx)
-
-	// NOTE: global StartPeriodicHealthCheck is intentionally NOT started.
-	// Its 60s timeout was too lenient and kept flapping pool-marked 'failed'
-	// proxies back to 'active', returning dead proxies to rotation.
-	// Pool-level health checks (PoolService cron) are authoritative.
-
 	cleanupSvc.Start(svcCtx)
+
+	// Start the global (orphan) health-check scheduler from persisted settings.
+	// If the settings cannot be read, leave the scheduler disabled.
+	if startCfg, err := settingsRepo.GetAll(context.Background()); err != nil {
+		log.Error("failed to load settings for global healthcheck startup", "error", err)
+		applyGlobalHealthCheckSettings(false, 0)
+	} else {
+		applyGlobalHealthCheckSettings(startCfg.GlobalHealthCheck.Enabled, startCfg.GlobalHealthCheck.IntervalMinutes)
+	}
 
 	s.setupMiddleware()
 	s.setupRoutes()
@@ -291,6 +397,9 @@ func (s *Server) setupRoutes() {
 		r.Put("/proxies/{id}", s.proxyHandler.Update)
 		r.Delete("/proxies/{id}", s.proxyHandler.Delete)
 		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
+		r.Post("/proxies/test/global", s.proxyHandler.TestGlobal)
+		r.Post("/proxies/test/idle", s.proxyHandler.TestIdle)
+		r.Get("/proxies/test/{job_id}", s.proxyHandler.TestJobStatus)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
 
 		// System logs
