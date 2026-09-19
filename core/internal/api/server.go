@@ -101,7 +101,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	healthChecker := proxy.NewHealthChecker(proxyRepo, settingsRepo, tracker, log)
 
 	// GeoIP + source + pool services
-	geoSvc := services.NewGeoIPService(settingsRepo, log)
+	geoSvc := services.NewGeoIPService(settingsRepo, log, cfg.GeoIP)
 	sourceSvc := services.NewSourceService(sourceRepo, proxyRepo, poolRepo, geoSvc, log)
 	// NOTE: Intentionally NOT wiring healthChecker into sourceSvc or starting a
 	// global periodic health check. The global HealthChecker uses a lenient
@@ -122,7 +122,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log, nil) // onUpdate set below
 	settingsHandler.SetGeoIPService(geoSvc)
 	websocketHandler := handlers.NewWebSocketHandler(dashboardRepo, proxyRepo, logRepo, log, cfg.CORSAllowedOrigins)
-	metricsHandler := handlers.NewMetricsHandler(log)
+	metricsHandler := handlers.NewMetricsHandler(log, geoSvc)
 	documentationHandler := handlers.NewDocumentationHandler()
 	sourceHandler := handlers.NewSourceHandler(sourceRepo, sourceSvc, log)
 	poolHandler := handlers.NewPoolHandler(poolRepo, poolSvc, log)
