@@ -145,6 +145,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		func() *handlers.GeoMetrics {
 			s := geoSvc.Metrics()
 			return &handlers.GeoMetrics{
+				Provider:             s.Provider,
 				QueuePending:         s.QueuePending,
 				QueuedInMemory:       s.QueuedInMemory,
 				BatchRequestsLastMin: s.BatchRequestsLastMin,

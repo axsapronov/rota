@@ -99,6 +99,7 @@ export interface SystemMetrics {
   // Optional background-pipeline sections (omitted by the API when the
   // corresponding provider is not wired)
   geo?: {
+    provider?: string
     queue_pending: number
     queued_in_memory: number
     batch_requests_last_minute: number

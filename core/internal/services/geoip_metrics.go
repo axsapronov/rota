@@ -7,6 +7,7 @@ import (
 
 // GeoIPMetricsSnapshot is the geo section of the system metrics API.
 type GeoIPMetricsSnapshot struct {
+	Provider             string  `json:"provider"`
 	QueuePending         int     `json:"queue_pending"`
 	QueuedInMemory       int     `json:"queued_in_memory"`
 	BatchRequestsLastMin int     `json:"batch_requests_last_minute"`

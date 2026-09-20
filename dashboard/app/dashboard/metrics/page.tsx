@@ -7,7 +7,7 @@ import { StatStrip, type StatTone } from "@/components/stat-strip"
 import { DefinitionList } from "@/components/definition-list"
 import { UsageBar } from "@/components/usage-bar"
 import { LiveRefresh } from "@/components/controls"
-import { ErrorStatus, HealthLine, OkStatus, OnOff, PendingStatus } from "@/components/status"
+import { ErrorStatus, HealthLine, OkStatus, OnOff, PendingStatus, Tag } from "@/components/status"
 import { api } from "@/lib/api"
 import { SystemMetrics } from "@/lib/types"
 import { bytes, count, percent, relative, seconds } from "@/lib/format"
@@ -156,7 +156,7 @@ function runStatus(status: "idle" | "ok" | "error") {
   return <PendingStatus>idle</PendingStatus>
 }
 
-const panelHeader = (Icon: typeof Globe, title: string, status: React.ReactNode) => (
+const panelHeader = (Icon: typeof Globe, title: React.ReactNode, status: React.ReactNode) => (
   <div className="flex items-center gap-2">
     <Icon className="text-muted-foreground size-4" aria-hidden />
     <h3 className="font-medium">{title}</h3>
@@ -169,7 +169,14 @@ function GeoPanel({ geo }: { geo: GeoSection }) {
   const atLimit = geo.usage_percent_1m >= 70
   return (
     <div className="border-border rounded-md p-4">
-      {panelHeader(Globe, "GeoIP Enrichment", atLimit ? <ErrorStatus>at limit</ErrorStatus> : <OkStatus>ok</OkStatus>)}
+      {panelHeader(
+        Globe,
+        <span className="flex items-center gap-1.5">
+          GeoIP Enrichment
+          {geo.provider && <Tag mono>{geo.provider}</Tag>}
+        </span>,
+        atLimit ? <ErrorStatus>at limit</ErrorStatus> : <OkStatus>ok</OkStatus>
+      )}
       <div className="mt-3 space-y-3">
         <div>
           <div className="mb-1 flex items-baseline justify-between text-xs">

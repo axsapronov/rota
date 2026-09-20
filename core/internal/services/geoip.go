@@ -771,9 +771,14 @@ func (g *GeoIPService) RecordIPsUpdated(n int) {
 	g.metrics.RecordIPsUpdated(n)
 }
 
-// Metrics returns the current geo enrichment metrics snapshot.
+// Metrics returns the current geo enrichment metrics snapshot, including the
+// active provider name.
 func (g *GeoIPService) Metrics() *GeoIPMetricsSnapshot {
-	return g.metrics.Metrics()
+	snap := g.metrics.Metrics()
+	g.mu.RLock()
+	snap.Provider = g.settings.Provider
+	g.mu.RUnlock()
+	return snap
 }
 
 // lookupMaxMind performs local GeoIP lookup using MaxMind DB reader.

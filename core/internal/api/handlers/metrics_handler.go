@@ -43,6 +43,7 @@ func NewMetricsHandler(
 // GeoMetrics is the geo section of the system metrics API (1:1 with the
 // GeoIP batch-enrichment snapshot; see feature 03).
 type GeoMetrics struct {
+	Provider             string  `json:"provider"`
 	QueuePending         int     `json:"queue_pending"`
 	QueuedInMemory       int     `json:"queued_in_memory"`
 	BatchRequestsLastMin int     `json:"batch_requests_last_minute"`
