@@ -163,7 +163,15 @@ export default function ProxiesPage() {
     return () => clearTimeout(timer)
   }, [searchQuery])
 
+  // Monotonic request counter. When pages are clicked faster than the
+  // server answers, responses arrive out of order; only the latest
+  // request's result is applied, so a stale response can no longer push
+  // the page back (which re-triggered the fetch and made the page
+  // indicator oscillate between two pages forever).
+  const fetchSeq = React.useRef(0)
+
   const fetchProxies = React.useCallback(async () => {
+    const seq = ++fetchSeq.current
     try {
       setIsLoading(true)
 
@@ -181,12 +189,14 @@ export default function ProxiesPage() {
         sort: sortField,
         order: sortOrder as "asc" | "desc" | undefined,
       })
+      if (seq !== fetchSeq.current) return
       setData(response.proxies)
       setPagination(response.pagination)
     } catch (error) {
+      if (seq !== fetchSeq.current) return
       console.error("Failed to fetch proxies:", error)
     } finally {
-      setIsLoading(false)
+      if (seq === fetchSeq.current) setIsLoading(false)
     }
   }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, countryFilter, sorting])
 
