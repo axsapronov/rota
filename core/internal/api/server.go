@@ -122,6 +122,10 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// putting dead proxies back into rotation. Pool-level health checks (cron-
 	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
+	// Route pool-sweep check results through the same batched result writer as
+	// the health checker (kind=pool), so a pool sweep no longer writes one
+	// UPDATE per proxy.
+	poolSvc.SetHealthCheckResultWriter(healthChecker.ResultWriter())
 	forceCleanupSvc := services.NewForceCleanupService(proxyRepo, log)
 	// Created here (before the handlers) so the proxy handler can offer a
 	// manual "cleanup now"; the background loop is started below.

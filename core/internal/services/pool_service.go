@@ -16,10 +16,18 @@ import (
 )
 
 // PoolService manages proxy pools: auto-sync by geo, health checks, rotation state
+// hcResultRecorder is the subset of proxy.ResultWriter used by pool sweeps to
+// persist check results in batches (kind=pool).
+type hcResultRecorder interface {
+	Record(rec proxy.CheckResultRecord)
+	Drain(ctx context.Context)
+}
+
 type PoolService struct {
 	poolRepo  *repository.PoolRepository
 	proxyRepo *repository.ProxyRepository
 	logger    *logger.Logger
+	hcResults hcResultRecorder
 
 	// per-pool rotation state (roundrobin index, stick counters)
 	mu          sync.Mutex
@@ -27,6 +35,13 @@ type PoolService struct {
 	stickCur    map[int]int       // pool_id -> current proxy index in stick mode
 	stickCount  map[int]int       // pool_id -> requests served on current proxy
 	lastCronRun map[int]time.Time // pool_id -> last scheduled health-check run
+}
+
+// SetHealthCheckResultWriter routes pool-sweep check results through the
+// shared batched result writer. When unset, pool checks persist synchronously
+// (legacy behavior, kept for tests).
+func (ps *PoolService) SetHealthCheckResultWriter(w hcResultRecorder) {
+	ps.hcResults = w
 }
 
 // NewPoolService creates a new PoolService
@@ -189,6 +204,10 @@ func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, p
 	for _, p := range proxies {
 		p := p
 		wp.Submit(func() {
+			if !ps.tryAcquireCheck(p.ID, "") {
+				return
+			}
+			defer ps.releaseCheck(p.ID, "")
 			ps.checkOneProxy(ctx, p, checkURL)
 		})
 	}
@@ -221,41 +240,67 @@ func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, checkURL
 
 	startedAt := time.Now()
 	wp := workerpool.New(workers)
-	type resultSlot struct {
-		result models.ProxyTestResult
-	}
-	slots := make([]resultSlot, len(proxies))
 
-	for i, pp := range proxies {
-		i := i
+	var (
+		mu      sync.Mutex
+		results []models.ProxyTestResult
+		active  int
+		failed  int
+		skipped int
+	)
+
+	for _, pp := range proxies {
 		pp := pp
 		wp.Submit(func() {
+			if !ps.tryAcquireCheck(pp.ProxyID, "") {
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+				return
+			}
+			defer ps.releaseCheck(pp.ProxyID, "")
 			res := ps.checkOneProxy(ctx, pp.ToProxy(), url)
-			slots[i].result = res
+			mu.Lock()
+			results = append(results, res)
+			if res.Status == "active" {
+				active++
+			} else {
+				failed++
+			}
+			mu.Unlock()
 		})
 	}
 	wp.StopWait()
+	ps.drainResults(ctx)
 
 	result := &models.PoolHealthCheckResult{
 		PoolID:     poolID,
 		PoolName:   pool.Name,
-		Checked:    len(proxies),
+		Checked:    len(results),
+		Active:     active,
+		Failed:     failed,
+		Results:    results,
 		StartedAt:  startedAt,
 		FinishedAt: time.Now(),
-	}
-	for _, s := range slots {
-		result.Results = append(result.Results, s.result)
-		if s.result.Status == "active" {
-			result.Active++
-		} else {
-			result.Failed++
-		}
 	}
 
 	ps.logger.Info("pool health check done",
 		"pool_id", poolID, "checked", result.Checked,
-		"active", result.Active, "failed", result.Failed)
+		"active", result.Active, "failed", result.Failed,
+		"skipped_inflight", skipped)
 	return result, nil
+}
+
+// tryAcquireCheck marks the proxy as in-flight for this job so overlapping
+// bulk jobs skip it (in-flight dedup). The paired release is releaseCheck.
+func (ps *PoolService) tryAcquireCheck(proxyID int, jobID string) bool {
+	acquired, _ := proxy.InFlightCheckDedup().TryAcquire(proxyID, jobID)
+	return acquired
+}
+
+// releaseCheck releases the in-flight slot for the proxy.
+func (ps *PoolService) releaseCheck(proxyID int, jobID string) {
+	proxy.InFlightCheckDedup().Release(proxyID, jobID)
 }
 
 // checkOneProxy performs a single proxy health check against the given URL.
@@ -277,7 +322,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, p.ID, "failed")
+		ps.recordPoolResult(ctx, p.ID, false, msg)
 		return result
 	}
 
@@ -297,7 +342,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, p.ID, "failed")
+		ps.recordPoolResult(ctx, p.ID, false, msg)
 		return result
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Rota/1.0)")
@@ -308,7 +353,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, p.ID, "failed")
+		ps.recordPoolResult(ctx, p.ID, false, msg)
 		return result
 	}
 	defer resp.Body.Close()
@@ -316,14 +361,43 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		result.Status = "active"
 		result.ResponseTime = &dur
-		ps.updateProxyStatus(ctx, p.ID, "active")
+		ps.recordPoolResult(ctx, p.ID, true, "")
 	} else {
 		result.Status = "failed"
 		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, p.ID, "failed")
+		ps.recordPoolResult(ctx, p.ID, false, msg)
 	}
 	return result
+}
+
+// drainResults flushes buffered pool check results before a sweep finishes,
+// so the job's finish state reflects every result it produced.
+func (ps *PoolService) drainResults(ctx context.Context) {
+	if ps.hcResults != nil {
+		ps.hcResults.Drain(ctx)
+	}
+}
+
+// recordPoolResult persists one pool-sweep check result. With the batched
+// result writer wired it is enqueued (kind=pool: immediate status semantics);
+// without one it falls back to a direct synchronous status write.
+func (ps *PoolService) recordPoolResult(ctx context.Context, proxyID int, success bool, errMsg string) {
+	if ps.hcResults != nil {
+		ps.hcResults.Record(proxy.CheckResultRecord{
+			ProxyID:   proxyID,
+			Success:   success,
+			LastError: errMsg,
+			Kind:      proxy.KindPool,
+			Timestamp: time.Now(),
+		})
+		return
+	}
+	if success {
+		ps.updateProxyStatus(ctx, proxyID, "active")
+	} else {
+		ps.updateProxyStatus(ctx, proxyID, "failed")
+	}
 }
 
 // updateProxyStatus writes the new status to the DB
@@ -337,13 +411,15 @@ func (ps *PoolService) updateProxyStatus(ctx context.Context, proxyID int, statu
 }
 
 // HealthCheckPoolWithProgress is like HealthCheckPool but calls progressFn after each proxy finishes.
-// progressFn receives (checked_so_far, active_so_far, failed_so_far).
+// progressFn receives (checked_so_far, active_so_far, failed_so_far). jobID
+// identifies this run in the in-flight dedup registry.
 func (ps *PoolService) HealthCheckPoolWithProgress(
 	ctx context.Context,
 	poolID int,
 	checkURL string,
 	workers int,
 	progressFn func(checked, active, failed int),
+	jobID string,
 ) (*models.PoolHealthCheckResult, error) {
 	pool, err := ps.poolRepo.GetByID(ctx, poolID)
 	if err != nil || pool == nil {
@@ -365,18 +441,30 @@ func (ps *PoolService) HealthCheckPoolWithProgress(
 
 	startedAt := time.Now()
 	wp := workerpool.New(workers)
-	slots := make([]models.ProxyTestResult, len(proxies))
 
-	var mu sync.Mutex
-	checked, active, failed := 0, 0, 0
+	var (
+		mu      sync.Mutex
+		results []models.ProxyTestResult
+		checked int
+		active  int
+		failed  int
+		skipped int
+	)
 
-	for i, pp := range proxies {
-		i, pp := i, pp
+	for _, pp := range proxies {
+		pp := pp
 		wp.Submit(func() {
+			if !ps.tryAcquireCheck(pp.ProxyID, jobID) {
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+				return
+			}
+			defer ps.releaseCheck(pp.ProxyID, jobID)
 			res := ps.checkOneProxyTimeout(ctx, pp.ToProxy(), url, 10*time.Second)
-			slots[i] = res
 
 			mu.Lock()
+			results = append(results, res)
 			checked++
 			if res.Status == "active" {
 				active++
@@ -392,14 +480,15 @@ func (ps *PoolService) HealthCheckPoolWithProgress(
 		})
 	}
 	wp.StopWait()
+	ps.drainResults(ctx)
 
 	result := &models.PoolHealthCheckResult{
 		PoolID:     poolID,
 		PoolName:   pool.Name,
-		Checked:    len(proxies),
+		Checked:    checked,
 		Active:     active,
 		Failed:     failed,
-		Results:    slots,
+		Results:    results,
 		StartedAt:  startedAt,
 		FinishedAt: time.Now(),
 	}
@@ -407,6 +496,8 @@ func (ps *PoolService) HealthCheckPoolWithProgress(
 	ps.logger.Info("pool health check done",
 		"pool_id", poolID, "checked", result.Checked,
 		"active", result.Active, "failed", result.Failed,
+		"skipped_inflight", skipped,
+		"throughput_per_s", proxy.ChecksPerSecond(checked, time.Since(startedAt)),
 		"url", url)
 	return result, nil
 }

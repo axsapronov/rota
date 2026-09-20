@@ -24,8 +24,8 @@ import (
 type HealthChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
 	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
-	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
-	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool, jobID string) ([]models.ProxyTestResult, error)
+	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool, jobID string) ([]models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -465,10 +465,11 @@ func (h *ProxyHandler) TestGlobal(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
 		return
 	}
+	snap, _ := services.GetJobStore().Snapshot(job.ID)
 	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
-		"job_id": job.ID,
-		"status": job.Status,
-		"total":  job.Total,
+		"job_id": snap.ID,
+		"status": snap.Status,
+		"total":  snap.Total,
 	})
 }
 
@@ -489,10 +490,11 @@ func (h *ProxyHandler) TestIdle(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
 		return
 	}
+	snap, _ := services.GetJobStore().Snapshot(job.ID)
 	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
-		"job_id": job.ID,
-		"status": job.Status,
-		"total":  job.Total,
+		"job_id": snap.ID,
+		"status": snap.Status,
+		"total":  snap.Total,
 	})
 }
 
@@ -533,10 +535,11 @@ func (h *ProxyHandler) TestBulk(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to start bulk proxy test")
 		return
 	}
+	snap, _ := services.GetJobStore().Snapshot(job.ID)
 	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
-		"job_id": job.ID,
-		"status": job.Status,
-		"total":  job.Total,
+		"job_id": snap.ID,
+		"status": snap.Status,
+		"total":  snap.Total,
 	})
 }
 
@@ -552,7 +555,7 @@ func (h *ProxyHandler) TestBulk(w http.ResponseWriter, r *http.Request) {
 //	@Router			/proxies/test/{job_id} [get]
 func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "job_id")
-	job, ok := services.GetJobStore().Get(jobID)
+	job, ok := services.GetJobStore().Snapshot(jobID)
 	if !ok || (job.Kind != services.HCJobKindProxy &&
 		job.Kind != services.HCJobKindOrphan &&
 		job.Kind != services.HCJobKindIdle &&
@@ -603,10 +606,11 @@ func (h *ProxyHandler) ForceCleanup(w http.ResponseWriter, r *http.Request) {
 	if alreadyRunning {
 		statusCode = http.StatusOK
 	}
+	snap, _ := services.GetJobStore().Snapshot(job.ID)
 	h.jsonResponse(w, statusCode, map[string]interface{}{
-		"job_id":          job.ID,
-		"status":          job.Status,
-		"total":           job.Total,
+		"job_id":          snap.ID,
+		"status":          snap.Status,
+		"total":           snap.Total,
 		"already_running": alreadyRunning,
 	})
 }

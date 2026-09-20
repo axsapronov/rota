@@ -9,6 +9,64 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 )
 
+// TestTrimJobResults verifies the results ring buffer: at or under the cap the
+// slice is returned unchanged; beyond it only the most recent failures are kept
+// (in chronological order), successes dropped.
+func TestTrimJobResults(t *testing.T) {
+	mk := func(n int, status string) []models.ProxyTestResult {
+		out := make([]models.ProxyTestResult, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, models.ProxyTestResult{ID: i + 1, Status: status})
+		}
+		return out
+	}
+
+	t.Run("under cap unchanged", func(t *testing.T) {
+		in := mk(50, "failed")
+		got := trimJobResults(in)
+		if len(got) != 50 {
+			t.Fatalf("len = %d, want 50", len(got))
+		}
+	})
+
+	t.Run("all failures over cap keeps newest", func(t *testing.T) {
+		in := mk(150, "failed")
+		got := trimJobResults(in)
+		if len(got) != maxJobResults {
+			t.Fatalf("len = %d, want %d", len(got), maxJobResults)
+		}
+		// Newest 100 of 150 = ids 51..150, chronological.
+		if got[0].ID != 51 || got[len(got)-1].ID != 150 {
+			t.Fatalf("kept ids = [%d..%d], want [51..150]", got[0].ID, got[len(got)-1].ID)
+		}
+		for i, r := range got {
+			if r.ID != 51+i {
+				t.Fatalf("order broken at %d: id %d, want %d", i, r.ID, 51+i)
+			}
+		}
+	})
+
+	t.Run("mixed keeps only failures", func(t *testing.T) {
+		in := make([]models.ProxyTestResult, 0, 150)
+		for i := 0; i < 150; i++ {
+			status := "failed"
+			if i%5 == 0 {
+				status = "active"
+			}
+			in = append(in, models.ProxyTestResult{ID: i + 1, Status: status})
+		}
+		got := trimJobResults(in)
+		if len(got) != maxJobResults {
+			t.Fatalf("len = %d, want %d", len(got), maxJobResults)
+		}
+		for _, r := range got {
+			if r.Status == "active" {
+				t.Fatalf("success leaked into trimmed results: %+v", r)
+			}
+		}
+	})
+}
+
 func TestHCJobStore_consumerSurvivesJobPanic(t *testing.T) {
 	store := newHCJobStore(8)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,6 +116,17 @@ func TestHCJobStore_consumerSurvivesJobPanic(t *testing.T) {
 	}
 }
 
+// queueHead returns the head item of the store's priority queue (test-only).
+func queueHead(t *testing.T, s *HCJobStore) hcQueueItem {
+	t.Helper()
+	s.queue.mu.Lock()
+	defer s.queue.mu.Unlock()
+	if len(s.queue.items) == 0 {
+		t.Fatal("queue is empty, want the requeued job")
+	}
+	return s.queue.items[0]
+}
+
 func TestHCJobStore_requeueRunningOnConsumerRestart(t *testing.T) {
 	store := newHCJobStore(4)
 	store.jobs["stuck"] = &HCJob{
@@ -69,18 +138,47 @@ func TestHCJobStore_requeueRunningOnConsumerRestart(t *testing.T) {
 
 	store.requeueInterruptedJobs()
 
-	select {
-	case id := <-store.queue:
-		if id != "stuck" {
-			t.Fatalf("requeued id = %q, want stuck", id)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("running job was not requeued")
+	head := queueHead(t, store)
+	if head.id != "stuck" {
+		t.Fatalf("requeued id = %q, want stuck", head.id)
+	}
+	if head.priority != hcPriorityForKind(HCJobKindPool) {
+		t.Fatalf("requeued priority = %d, want %d", head.priority, hcPriorityForKind(HCJobKindPool))
 	}
 
 	j, ok := store.Get("stuck")
 	if !ok || j.Status != HCJobPending {
 		t.Fatalf("job status = %v, want pending", j.Status)
+	}
+}
+
+// TestHCJobStore_requeueUsesJobPriority verifies that interrupted jobs of
+// different kinds are requeued with the priority of their kind, so the
+// restart path does not change a job's queue position class.
+func TestHCJobStore_requeueUsesJobPriority(t *testing.T) {
+	store := newHCJobStore(8)
+	store.jobs["pool-run"] = &HCJob{ID: "pool-run", Kind: HCJobKindPool, Status: HCJobRunning}
+	store.jobs["idle-run"] = &HCJob{ID: "idle-run", Kind: HCJobKindIdle, Status: HCJobRunning}
+	store.jobs["pool-done"] = &HCJob{ID: "pool-done", Kind: HCJobKindPool, Status: HCJobDone}
+	store.ctx = context.Background()
+
+	store.requeueInterruptedJobs()
+
+	store.queue.mu.Lock()
+	got := make(map[string]hcPriority, len(store.queue.items))
+	for _, it := range store.queue.items {
+		got[it.id] = it.priority
+	}
+	store.queue.mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("requeued %d jobs, want 2 (running only): %v", len(got), got)
+	}
+	if got["pool-run"] != hcPriorityHigh {
+		t.Fatalf("pool-run priority = %d, want HIGH", got["pool-run"])
+	}
+	if got["idle-run"] != hcPriorityLow {
+		t.Fatalf("idle-run priority = %d, want LOW", got["idle-run"])
 	}
 }
 
@@ -108,6 +206,153 @@ func TestHCJobStore_queueFullReturnsError(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("second create blocked; it must return immediately when the queue is full")
+	}
+}
+
+// TestHCPriorityQueue_Order verifies the heap choice order: priority first
+// (HIGH before MEDIUM before LOW), FIFO within a level.
+func TestHCPriorityQueue_Order(t *testing.T) {
+	t0 := time.Now()
+	q := newHCPriorityQueue(10, func() time.Time { return t0 })
+
+	push := func(id string, p hcPriority, at time.Time) {
+		if !q.enqueue(id, p, at) {
+			t.Fatalf("enqueue %s: queue full", id)
+		}
+	}
+	push("low1", hcPriorityLow, t0)
+	push("med1", hcPriorityMedium, t0.Add(1*time.Minute))
+	push("high1", hcPriorityHigh, t0.Add(2*time.Minute))
+	push("med2", hcPriorityMedium, t0.Add(3*time.Minute))
+	push("low2", hcPriorityLow, t0.Add(4*time.Minute))
+
+	want := []struct {
+		id   string
+		prio hcPriority
+	}{
+		{"high1", hcPriorityHigh},
+		{"med1", hcPriorityMedium},
+		{"med2", hcPriorityMedium},
+		{"low1", hcPriorityLow},
+		{"low2", hcPriorityLow},
+	}
+	for i, w := range want {
+		class := consumerMedLow
+		if w.prio == hcPriorityHigh {
+			class = consumerHigh
+		}
+		item, ok := q.popIf(context.Background(), class)
+		if !ok {
+			t.Fatalf("pop %d: queue drained early", i)
+		}
+		if item.id != w.id {
+			t.Fatalf("pop %d = %q, want %q (FIFO within level / priority order broken)", i, item.id, w.id)
+		}
+	}
+}
+
+// TestHCPriorityQueue_Aging verifies that a LOW job that has waited longer
+// than hcAgingAfter is promoted ahead of a newly enqueued MEDIUM job in the
+// MEDIUM/LOW consumer, while a still-young LOW job does not.
+func TestHCPriorityQueue_Aging(t *testing.T) {
+	now := time.Now()
+	q := newHCPriorityQueue(10, func() time.Time { return now })
+	q.enqueue("old-low", hcPriorityLow, now.Add(-20*time.Minute)) // aged: 20m > 15m
+	q.enqueue("new-med", hcPriorityMedium, now)
+
+	item, ok := q.popIf(context.Background(), consumerMedLow)
+	if !ok || item.id != "old-low" {
+		t.Fatalf("popped %q (ok=%v), want the aged low job first", item.id, ok)
+	}
+
+	// Before the aging threshold the medium job goes first.
+	q2 := newHCPriorityQueue(10, func() time.Time { return now })
+	q2.enqueue("young-low", hcPriorityLow, now.Add(-10*time.Minute)) // 10m < 15m
+	q2.enqueue("new-med", hcPriorityMedium, now)
+	item2, ok2 := q2.popIf(context.Background(), consumerMedLow)
+	if !ok2 || item2.id != "new-med" {
+		t.Fatalf("popped %q (ok=%v), want the medium job before aging kicks in", item2.id, ok2)
+	}
+}
+
+// TestHCPriorityQueue_Full verifies the capacity bound: enqueue is rejected
+// (false) once the queue is at capacity.
+func TestHCPriorityQueue_Full(t *testing.T) {
+	q := newHCPriorityQueue(2, time.Now)
+	if !q.enqueue("a", hcPriorityHigh, time.Now()) {
+		t.Fatal("first enqueue should succeed")
+	}
+	if !q.enqueue("b", hcPriorityLow, time.Now()) {
+		t.Fatal("second enqueue should succeed")
+	}
+	if q.enqueue("c", hcPriorityHigh, time.Now()) {
+		t.Fatal("third enqueue should be rejected at capacity")
+	}
+}
+
+// TestHCJobStore_HighStartsWhileMediumRunning verifies the two-consumer split:
+// a HIGH (pool) job starts while a MEDIUM (orphan) job is still running.
+func TestHCJobStore_HighStartsWhileMediumRunning(t *testing.T) {
+	store := newHCJobStore(8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.Start(ctx, nil)
+
+	mediumStarted := make(chan struct{})
+	releaseMedium := make(chan struct{})
+	if _, err := store.Create(HCJobKindOrphan, 0, "Orphan proxies", "", 0, nil, func(s *HCJobStore, job *HCJob) {
+		close(mediumStarted)
+		<-releaseMedium
+	}); err != nil {
+		t.Fatalf("create medium job: %v", err)
+	}
+
+	select {
+	case <-mediumStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("medium job did not start")
+	}
+
+	highDone := make(chan struct{})
+	if _, err := store.Create(HCJobKindPool, 1, "Pool #1", "", 5, nil, func(s *HCJobStore, job *HCJob) {
+		s.finishDone(job.ID)
+		close(highDone)
+	}); err != nil {
+		t.Fatalf("create high job: %v", err)
+	}
+
+	select {
+	case <-highDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HIGH job did not start while the MEDIUM job was running")
+	}
+	close(releaseMedium)
+}
+
+// TestHCJobStore_ConsumersStopWithCtx verifies both consumers stop when the
+// context is cancelled: jobs enqueued afterwards are never picked up.
+func TestHCJobStore_ConsumersStopWithCtx(t *testing.T) {
+	store := newHCJobStore(8)
+	ctx, cancel := context.WithCancel(context.Background())
+	store.Start(ctx, nil)
+	cancel()
+
+	done := make(chan struct{})
+	if _, err := store.Create(HCJobKindPool, 1, "Pool #1", "", 5, nil, func(s *HCJobStore, job *HCJob) {
+		close(done)
+	}); err != nil {
+		t.Fatalf("create high job: %v", err)
+	}
+	if _, err := store.Create(HCJobKindIdle, 0, "Idle orphan proxies", "", 0, nil, func(s *HCJobStore, job *HCJob) {
+		close(done)
+	}); err != nil {
+		t.Fatalf("create low job: %v", err)
+	}
+
+	select {
+	case <-done:
+		t.Fatal("a consumer ran a job after its context was cancelled")
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -139,6 +384,45 @@ func TestHCJobStore_FindActiveByKind(t *testing.T) {
 	}
 }
 
+func TestHCJobStore_FindActiveCovering(t *testing.T) {
+	store := newHCJobStore(8)
+	now := time.Now()
+
+	store.mu.Lock()
+	store.jobs["first"] = &HCJob{ID: "first", Kind: HCJobKindProxy, Status: HCJobRunning,
+		ProxyIDs: []int{1, 2}, StartedAt: now}
+	store.jobs["second"] = &HCJob{ID: "second", Kind: HCJobKindProxy, Status: HCJobPending,
+		ProxyIDs: []int{2, 3}, StartedAt: now.Add(time.Minute)}
+	store.jobs["disjoint"] = &HCJob{ID: "disjoint", Kind: HCJobKindProxy, Status: HCJobRunning,
+		ProxyIDs: []int{40, 50}, StartedAt: now.Add(2 * time.Minute)}
+	store.jobs["done"] = &HCJob{ID: "done", Kind: HCJobKindProxy, Status: HCJobDone,
+		ProxyIDs: []int{1, 2, 3}, StartedAt: now.Add(3 * time.Minute)}
+	store.jobs["other-kind"] = &HCJob{ID: "other-kind", Kind: HCJobKindOrphan, Status: HCJobRunning,
+		StartedAt: now.Add(4 * time.Minute)}
+	store.mu.Unlock()
+
+	// Only the first job covers {1}.
+	if j, ok := store.FindActiveCovering([]int{1}); !ok || j.ID != "first" {
+		t.Fatalf("FindActiveCovering([1]) = (%v, %v), want the first job", j, ok)
+	}
+	// Both cover {2}; the newest covering job wins.
+	if j, ok := store.FindActiveCovering([]int{2}); !ok || j.ID != "second" {
+		t.Fatalf("FindActiveCovering([2]) = (%v, %v), want the newest covering job", j, ok)
+	}
+	// No single job covers {1,3}.
+	if _, ok := store.FindActiveCovering([]int{1, 3}); ok {
+		t.Fatal("FindActiveCovering([1,3]) found a covering job, want none")
+	}
+	// Nothing covers 9.
+	if _, ok := store.FindActiveCovering([]int{9}); ok {
+		t.Fatal("FindActiveCovering([9]) found a covering job, want none")
+	}
+	// An empty request matches nothing.
+	if _, ok := store.FindActiveCovering(nil); ok {
+		t.Fatal("FindActiveCovering(nil) found a covering job, want none")
+	}
+}
+
 func TestHCJobStore_queuePending(t *testing.T) {
 	store := newHCJobStore(8)
 
@@ -166,6 +450,7 @@ func (f *fakeProxyIDsChecker) CheckProxiesWithProgress(
 	proxyIDs []int,
 	onProgress func(checked, active, failed int),
 	immediate bool,
+	jobID string,
 ) ([]models.ProxyTestResult, error) {
 	f.calls.Add(1)
 	if f.err != nil {

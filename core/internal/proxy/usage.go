@@ -267,8 +267,10 @@ func (t *UsageTracker) flush(ctx context.Context, batch []RequestRecord) {
 		if !a.lastWasSuccess && a.lastError != "" {
 			lastErr = &a.lastError
 		}
+		// last_check is TIMESTAMP WITHOUT TIME ZONE; store UTC wall-clock so
+		// Go-written values line up with the NOW()-based TTL filter.
 		b.Queue(updateStatsBatchSQL, id, a.reqDelta, a.succDelta, a.sumRT,
-			a.lastWasSuccess, a.hadSuccess, a.trailingFails, lastErr, a.lastTS)
+			a.lastWasSuccess, a.hadSuccess, a.trailingFails, lastErr, a.lastTS.UTC())
 	}
 	br := pool.SendBatch(ctx, b)
 	for range order {
@@ -377,7 +379,7 @@ func (t *UsageTracker) updateProxyStats(ctx context.Context, record RequestRecor
 		record.ProxyID,
 		record.Success,
 		record.ResponseTime,
-		record.Timestamp,
+		record.Timestamp.UTC(),
 		errorMsg,
 	)
 

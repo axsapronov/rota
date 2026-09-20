@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/checkstats"
@@ -15,14 +16,27 @@ import (
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/gammazero/workerpool"
+	"github.com/jackc/pgx/v5"
 )
+
+// hcBatchSize bounds the keyset pagination of bulk health checks: each query
+// fetches at most this many proxies, so memory stays flat at any scale.
+const hcBatchSize = 1000
 
 // HealthChecker manages proxy health checking
 type HealthChecker struct {
 	proxyRepo    *repository.ProxyRepository
 	settingsRepo *repository.SettingsRepository
 	tracker      *UsageTracker
-	logger       *logger.Logger
+	results      *ResultWriter
+	// dedup is the in-flight registry shared with every other check path; a
+	// proxy being checked by one job is skipped (not re-checked) by others.
+	// Nil falls back to the process-wide registry.
+	dedup *CheckDedup
+	// checkFn, when set, replaces CheckProxy in bulk runs (test hook for a
+	// scripted/counter check).
+	checkFn func(ctx context.Context, p *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
+	logger  *logger.Logger
 	// settingsMu guards settings, which CheckAllProxies rewrites while worker
 	// goroutines / CheckProxy read it — periodic and API-triggered checks can
 	// otherwise race (AUD-8).
@@ -44,6 +58,165 @@ func (h *HealthChecker) setSettings(settings *models.HealthCheckSettings) {
 	h.settings = settings
 }
 
+// loadSettings reads the health-check settings from the repository and caches
+// them under the lock (AUD-8).
+func (h *HealthChecker) loadSettings(ctx context.Context) (*models.HealthCheckSettings, error) {
+	all, err := h.settingsRepo.GetAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load settings: %w", err)
+	}
+	settings := &all.HealthCheck
+	h.setSettings(settings)
+	return settings, nil
+}
+
+// lastCheckTTLCond returns the shared SQL fragment restricting a sweep to
+// proxies that were never checked (last_check IS NULL) or whose last check is
+// older than ttlMinutes. It returns an empty string when ttlMinutes <= 0,
+// disabling the filter. The value is inlined: it is an int from validated
+// settings (0-10080), never user input.
+func lastCheckTTLCond(ttlMinutes int) string {
+	if ttlMinutes <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("(p.last_check IS NULL OR p.last_check < NOW() - (%d * INTERVAL '1 minute'))", ttlMinutes)
+}
+
+// proxySelectColumns is the standard 14-column proxy projection shared by the
+// bulk health-check queries.
+const proxySelectColumns = `
+		id, address, protocol, username, password, status,
+		requests, successful_requests, failed_requests,
+		avg_response_time, last_check, last_error, created_at, updated_at
+`
+
+// scanProxyRows scans the proxySelectColumns projection into Proxy models.
+func scanProxyRows(rows pgx.Rows) ([]*models.Proxy, error) {
+	proxies := make([]*models.Proxy, 0)
+	for rows.Next() {
+		var p models.Proxy
+		if err := rows.Scan(
+			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
+			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
+			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan proxy: %w", err)
+		}
+		proxies = append(proxies, &p)
+	}
+	return proxies, rows.Err()
+}
+
+// runCheckedBatches streams proxies through load (keyset batches) and checks
+// each batch concurrently on a shared worker pool, waiting for a batch to
+// finish before fetching the next one. onProgress receives cumulative
+// (checked, active, failed) totals after every proxy. A proxy already being
+// checked by another in-flight job is skipped (in-flight dedup): no duplicate
+// network check, no result, and it does not count toward progress.
+// dedupRegistry returns the in-flight registry for this checker (falling back
+// to the process-wide one when a test constructs the checker directly).
+func (h *HealthChecker) dedupRegistry() *CheckDedup {
+	if h.dedup != nil {
+		return h.dedup
+	}
+	return globalCheckDedup
+}
+
+func (h *HealthChecker) runCheckedBatches(
+	ctx context.Context,
+	load func(ctx context.Context, lastID int) ([]*models.Proxy, error),
+	onProgress func(checked, active, failed int),
+	immediate bool,
+	workers int,
+	logLabel string,
+	jobID string,
+) ([]models.ProxyTestResult, int, error) {
+	check := h.CheckProxy
+	if h.checkFn != nil {
+		check = h.checkFn
+	}
+
+	wp := workerpool.New(workers)
+	defer wp.StopWait()
+
+	// Progress counters are atomic: workers update them lock-free, keeping the
+	// per-check mutex off the hot path. The results slice still needs a mutex
+	// (append is not atomic).
+	var (
+		resultsMu sync.Mutex
+		results   []models.ProxyTestResult
+		checked   atomic.Int64
+		active    atomic.Int64
+		failed    atomic.Int64
+		skipped   atomic.Int64
+	)
+
+	lastID := 0
+	for {
+		batch, err := load(ctx, lastID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		var batchWG sync.WaitGroup
+		for _, p := range batch {
+			batchWG.Add(1)
+			p := p
+			wp.Submit(func() {
+				defer batchWG.Done()
+				dedup := h.dedupRegistry()
+				acquired, _ := dedup.TryAcquire(p.ID, jobID)
+				if !acquired {
+					skipped.Add(1)
+					return
+				}
+				defer dedup.Release(p.ID, jobID)
+				result, err := check(ctx, p, immediate)
+				if err != nil {
+					h.logger.Error(logLabel+" error",
+						"proxy_id", p.ID,
+						"proxy_address", p.Address,
+						"error", err,
+					)
+					errMsg := err.Error()
+					resultsMu.Lock()
+					results = append(results, models.ProxyTestResult{
+						ID: p.ID, Address: p.Address, Status: "failed",
+						TestedAt: time.Now(), Error: &errMsg,
+					})
+					resultsMu.Unlock()
+					failed.Add(1)
+				} else {
+					resultsMu.Lock()
+					results = append(results, *result)
+					resultsMu.Unlock()
+					if result.Status == "active" {
+						active.Add(1)
+					} else {
+						failed.Add(1)
+					}
+				}
+				checked.Add(1)
+				if onProgress != nil {
+					onProgress(int(checked.Load()), int(active.Load()), int(failed.Load()))
+				}
+			})
+		}
+
+		lastID = batch[len(batch)-1].ID
+		batchWG.Wait()
+
+		if len(batch) < hcBatchSize {
+			break
+		}
+	}
+
+	return results, int(skipped.Load()), nil
+}
+
 // NewHealthChecker creates a new health checker
 func NewHealthChecker(
 	proxyRepo *repository.ProxyRepository,
@@ -55,8 +228,16 @@ func NewHealthChecker(
 		proxyRepo:    proxyRepo,
 		settingsRepo: settingsRepo,
 		tracker:      tracker,
+		results:      NewResultWriter(proxyRepo, log),
+		dedup:        globalCheckDedup,
 		logger:       log,
 	}
+}
+
+// ResultWriter exposes the batched check-result writer (for pool sweeps and
+// shutdown draining).
+func (h *HealthChecker) ResultWriter() *ResultWriter {
+	return h.results
 }
 
 // CheckProxy tests a single proxy. When immediate is true (user-initiated
@@ -196,100 +377,52 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy, imm
 	return result, nil
 }
 
-// persistCheckResult records a check result in the database asynchronously.
-// Manual tests (immediate) apply the status right away via
-// RecordManualTestResult; periodic checks use the consecutive-failure
-// accounting of RecordHealthCheck. The write runs in its own goroutine with a
-// detached, bounded context so a slow or dead database never blocks the check
-// result; a failed write is logged only.
+// persistCheckResult enqueues a check result for batched persistence. Manual
+// tests (immediate) use the immediate-status semantics; periodic checks use
+// the consecutive-failure hysteresis. The enqueue is non-blocking, so a slow
+// or dead database never blocks the check path; failed flushes are logged by
+// the writer only.
 func (h *HealthChecker) persistCheckResult(ctx context.Context, proxyID int, success bool, errMsg string, duration int, immediate bool) {
 	// Record the completion synchronously (not inside the async DB write) so the
 	// rolling window reflects when checks finish, not when the DB write lands.
 	checkstats.Record(success)
 
-	go func() {
-		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		var err error
-		if immediate {
-			err = h.tracker.RecordManualTestResult(recordCtx, proxyID, success, errMsg)
-		} else {
-			err = h.tracker.RecordHealthCheck(recordCtx, proxyID, success, duration, errMsg)
-		}
-		if err != nil {
-			h.logger.Error("failed to persist proxy check result",
-				"proxy_id", proxyID,
-				"success", success,
-				"immediate", immediate,
-				"error", err,
-			)
-		}
-	}()
+	kind := KindPeriodic
+	if immediate {
+		kind = KindManual
+	}
+	if h.results != nil {
+		h.results.Record(CheckResultRecord{
+			ProxyID:   proxyID,
+			Success:   success,
+			Duration:  duration,
+			LastError: errMsg,
+			Kind:      kind,
+			Timestamp: time.Now(),
+		})
+	}
 }
 
 // CheckAllProxies tests all proxies concurrently with periodic
 // (non-immediate) status accounting.
 func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error) {
-	return h.CheckAllProxiesWithProgress(ctx, nil, false)
+	return h.CheckAllProxiesWithProgress(ctx, nil, false, "")
 }
 
 // CheckAllProxiesWithProgress tests all proxies concurrently, calling
 // onProgress(checked, active, failed) after each proxy is checked (nil-safe).
 // immediate=true applies each result to the proxy status right away
-// (user-initiated); false keeps the consecutive-failure accounting.
+// (user-initiated); false keeps the consecutive-failure accounting. jobID
+// identifies this run in the in-flight dedup registry ("" outside a job).
 func (h *HealthChecker) CheckAllProxiesWithProgress(
 	ctx context.Context,
 	onProgress func(checked, active, failed int),
 	immediate bool,
+	jobID string,
 ) ([]models.ProxyTestResult, error) {
-	// Load settings and cache them under the lock (AUD-8).
-	all, err := h.settingsRepo.GetAll(ctx)
+	settings, err := h.loadSettings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w", err)
-	}
-	settings := &all.HealthCheck
-	h.setSettings(settings)
-
-	// Get only orphan proxies (not attached to any pool) so the global health
-	// check does not interfere with pool-level health checks, which are the
-	// single source of truth for pool-marked proxies.
-	query := `
-		SELECT
-			id, address, protocol, username, password, status,
-			requests, successful_requests, failed_requests,
-			avg_response_time, last_check, last_error, created_at, updated_at
-		FROM proxies p
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM pool_proxies ppm
-			WHERE ppm.proxy_id = p.id
-		)
-		ORDER BY address
-	`
-
-	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get proxies: %w", err)
-	}
-	defer rows.Close()
-
-	proxies := make([]*models.Proxy, 0)
-	for rows.Next() {
-		var p models.Proxy
-		err := rows.Scan(
-			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
-			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan proxy: %w", err)
-		}
-		proxies = append(proxies, &p)
-	}
-
-	if len(proxies) == 0 {
-		return []models.ProxyTestResult{}, nil
+		return nil, err
 	}
 
 	workers := settings.Workers
@@ -299,58 +432,46 @@ func (h *HealthChecker) CheckAllProxiesWithProgress(
 			"configured_workers", settings.Workers, "fallback_workers", workers)
 	}
 
-	h.logger.Info("starting health check", "proxy_count", len(proxies), "workers", workers)
+	h.logger.Info("starting health check", "workers", workers, "batch_size", hcBatchSize)
+	startedAt := time.Now()
 
-	// Create worker pool
-	wp := workerpool.New(workers)
-	results := make([]models.ProxyTestResult, len(proxies))
-	var statsMu sync.Mutex
-	checked := 0
-	active := 0
-	failed := 0
-
-	// Submit jobs
-	for i, proxy := range proxies {
-		idx := i
-		p := proxy
-		wp.Submit(func() {
-			result, err := h.CheckProxy(ctx, p, immediate)
-			statsMu.Lock()
-			defer statsMu.Unlock()
-			if err != nil {
-				h.logger.Error("health check error",
-					"proxy_id", p.ID,
-					"proxy_address", p.Address,
-					"error", err,
-				)
-				results[idx] = models.ProxyTestResult{
-					ID:       p.ID,
-					Address:  p.Address,
-					Status:   "failed",
-					TestedAt: time.Now(),
-				}
-				errMsg := err.Error()
-				results[idx].Error = &errMsg
-				failed++
-			} else {
-				results[idx] = *result
-				if result.Status == "active" {
-					active++
-				} else {
-					failed++
-				}
-			}
-			checked++
-			if onProgress != nil {
-				onProgress(checked, active, failed)
-			}
-		})
+	// Get only orphan proxies (not attached to any pool) so the global health
+	// check does not interfere with pool-level health checks, which are the
+	// single source of truth for pool-marked proxies. The TTL filter skips
+	// orphans checked more recently than the configured window. Rows stream in
+	// keyset batches (id > last, ORDER BY id) so memory stays flat.
+	baseQuery := "SELECT " + proxySelectColumns + `
+		FROM proxies p
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM pool_proxies ppm
+			WHERE ppm.proxy_id = p.id
+		)
+	`
+	if cond := lastCheckTTLCond(settings.OrphanTTLMinutes); cond != "" {
+		baseQuery += "AND " + cond + "\n"
 	}
+	baseQuery += "AND p.id > $1\nORDER BY p.id\nLIMIT $2"
 
-	// Wait for all jobs to complete
-	wp.StopWait()
+	results, skipped, err := h.runCheckedBatches(ctx, func(ctx context.Context, lastID int) ([]*models.Proxy, error) {
+		rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, baseQuery, lastID, hcBatchSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get proxies: %w", err)
+		}
+		defer rows.Close()
+		return scanProxyRows(rows)
+	}, onProgress, immediate, workers, "health check", jobID)
+	if err != nil {
+		return nil, err
+	}
+	h.drainResults(ctx)
 
-	h.logger.Info("health check completed", "proxy_count", len(proxies))
+	h.logger.Info("health check completed",
+		"checked", len(results),
+		"skipped_inflight", skipped,
+		"throughput_per_s", ChecksPerSecond(len(results), time.Since(startedAt)),
+		"orphan_ttl_minutes", settings.OrphanTTLMinutes,
+	)
 
 	return results, nil
 }
@@ -358,57 +479,23 @@ func (h *HealthChecker) CheckAllProxiesWithProgress(
 // CheckProxiesWithProgress health-checks the given proxy IDs concurrently,
 // calling onProgress(checked, active, failed) after each proxy is checked
 // (nil-safe). immediate=true applies each result to the proxy status right
-// away (user-initiated). IDs that no longer exist are silently skipped.
+// away (user-initiated). IDs that no longer exist are silently skipped. jobID
+// identifies this run in the in-flight dedup registry ("" outside a job).
 func (h *HealthChecker) CheckProxiesWithProgress(
 	ctx context.Context,
 	proxyIDs []int,
 	onProgress func(checked, active, failed int),
 	immediate bool,
+	jobID string,
 ) ([]models.ProxyTestResult, error) {
 	if len(proxyIDs) == 0 {
 		return []models.ProxyTestResult{}, nil
 	}
 
-	// Load settings and cache them under the lock (AUD-8).
-	all, err := h.settingsRepo.GetAll(ctx)
+	// Explicit user-selected IDs: no TTL filter (the user asked for these).
+	settings, err := h.loadSettings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w", err)
-	}
-	settings := &all.HealthCheck
-	h.setSettings(settings)
-
-	query := `
-		SELECT
-			id, address, protocol, username, password, status,
-			requests, successful_requests, failed_requests,
-			avg_response_time, last_check, last_error, created_at, updated_at
-		FROM proxies
-		WHERE id = ANY($1)
-		ORDER BY id
-	`
-
-	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query, proxyIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get proxies: %w", err)
-	}
-	defer rows.Close()
-
-	proxies := make([]*models.Proxy, 0, len(proxyIDs))
-	for rows.Next() {
-		var p models.Proxy
-		err := rows.Scan(
-			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
-			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan proxy: %w", err)
-		}
-		proxies = append(proxies, &p)
-	}
-
-	if len(proxies) == 0 {
-		return []models.ProxyTestResult{}, nil
+		return nil, err
 	}
 
 	workers := settings.Workers
@@ -416,64 +503,47 @@ func (h *HealthChecker) CheckProxiesWithProgress(
 		workers = 20
 	}
 
-	h.logger.Info("starting bulk proxy health check", "proxy_count", len(proxies), "workers", workers)
+	h.logger.Info("starting bulk proxy health check", "requested", len(proxyIDs), "workers", workers, "batch_size", hcBatchSize)
+	startedAt := time.Now()
 
-	// Create worker pool
-	wp := workerpool.New(workers)
-	results := make([]models.ProxyTestResult, len(proxies))
-	var statsMu sync.Mutex
-	checked := 0
-	active := 0
-	failed := 0
+	query := "SELECT " + proxySelectColumns + `
+		FROM proxies
+		WHERE id = ANY($1)
+		AND id > $2
+		ORDER BY id
+		LIMIT $3
+	`
 
-	// Submit jobs
-	for i, proxy := range proxies {
-		idx := i
-		p := proxy
-		wp.Submit(func() {
-			result, err := h.CheckProxy(ctx, p, immediate)
-			statsMu.Lock()
-			defer statsMu.Unlock()
-			if err != nil {
-				h.logger.Error("bulk health check error",
-					"proxy_id", p.ID,
-					"proxy_address", p.Address,
-					"error", err,
-				)
-				results[idx] = models.ProxyTestResult{
-					ID:       p.ID,
-					Address:  p.Address,
-					Status:   "failed",
-					TestedAt: time.Now(),
-				}
-				errMsg := err.Error()
-				results[idx].Error = &errMsg
-				failed++
-			} else {
-				results[idx] = *result
-				if result.Status == "active" {
-					active++
-				} else {
-					failed++
-				}
-			}
-			checked++
-			if onProgress != nil {
-				onProgress(checked, active, failed)
-			}
-		})
+	results, skipped, err := h.runCheckedBatches(ctx, func(ctx context.Context, lastID int) ([]*models.Proxy, error) {
+		rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query, proxyIDs, lastID, hcBatchSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get proxies: %w", err)
+		}
+		defer rows.Close()
+		return scanProxyRows(rows)
+	}, onProgress, immediate, workers, "bulk health check", jobID)
+	if err != nil {
+		return nil, err
 	}
+	h.drainResults(ctx)
 
-	// Wait for all jobs to complete
-	wp.StopWait()
-
-	h.logger.Info("bulk proxy health check completed", "proxy_count", len(proxies))
+	h.logger.Info("bulk proxy health check completed",
+		"checked", len(results),
+		"skipped_inflight", skipped,
+		"throughput_per_s", ChecksPerSecond(len(results), time.Since(startedAt)),
+	)
 
 	return results, nil
 }
 
-// CountOrphanProxies returns the number of proxies not attached to any pool.
+// CountOrphanProxies returns the number of proxies not attached to any pool,
+// applying the orphan TTL filter (same window as the sweep, so a job's Total
+// equals the number of proxies it will actually check).
 func (h *HealthChecker) CountOrphanProxies(ctx context.Context) (int, error) {
+	settings, err := h.loadSettings(ctx)
+	if err != nil {
+		return 0, err
+	}
 	query := `
 		SELECT COUNT(*)
 		FROM proxies p
@@ -483,6 +553,9 @@ func (h *HealthChecker) CountOrphanProxies(ctx context.Context) (int, error) {
 			WHERE ppm.proxy_id = p.id
 		)
 	`
+	if cond := lastCheckTTLCond(settings.OrphanTTLMinutes); cond != "" {
+		query += "AND " + cond
+	}
 	var total int
 	if err := h.proxyRepo.GetDB().Pool.QueryRow(ctx, query).Scan(&total); err != nil {
 		return 0, fmt.Errorf("failed to count orphan proxies: %w", err)
@@ -490,13 +563,15 @@ func (h *HealthChecker) CountOrphanProxies(ctx context.Context) (int, error) {
 	return total, nil
 }
 
-// ListOrphanIdleProxies loads orphan proxies with status idle.
-func (h *HealthChecker) ListOrphanIdleProxies(ctx context.Context) ([]*models.Proxy, error) {
-	query := `
-		SELECT
-			id, address, protocol, username, password, status,
-			requests, successful_requests, failed_requests,
-			avg_response_time, last_check, last_error, created_at, updated_at
+// listOrphanIdleBatch loads one keyset batch (id > lastID, ORDER BY id LIMIT
+// hcBatchSize) of orphan proxies with status idle, applying the idle TTL
+// filter.
+func (h *HealthChecker) listOrphanIdleBatch(ctx context.Context, lastID int) ([]*models.Proxy, error) {
+	settings, err := h.loadSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := "SELECT " + proxySelectColumns + `
 		FROM proxies p
 		WHERE p.status = 'idle'
 		AND NOT EXISTS (
@@ -504,32 +579,26 @@ func (h *HealthChecker) ListOrphanIdleProxies(ctx context.Context) ([]*models.Pr
 			FROM pool_proxies ppm
 			WHERE ppm.proxy_id = p.id
 		)
-		ORDER BY address
 	`
-	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query)
+	if cond := lastCheckTTLCond(settings.IdleTTLMinutes); cond != "" {
+		query += "AND " + cond + "\n"
+	}
+	query += "AND p.id > $1\nORDER BY p.id\nLIMIT $2"
+	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query, lastID, hcBatchSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orphan idle proxies: %w", err)
 	}
 	defer rows.Close()
-
-	proxies := make([]*models.Proxy, 0)
-	for rows.Next() {
-		var p models.Proxy
-		err := rows.Scan(
-			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
-			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan proxy: %w", err)
-		}
-		proxies = append(proxies, &p)
-	}
-	return proxies, nil
+	return scanProxyRows(rows)
 }
 
-// CountOrphanIdleProxies returns the number of orphan proxies with status idle.
+// CountOrphanIdleProxies returns the number of orphan proxies with status
+// idle, applying the idle TTL filter (same window as the sweep).
 func (h *HealthChecker) CountOrphanIdleProxies(ctx context.Context) (int, error) {
+	settings, err := h.loadSettings(ctx)
+	if err != nil {
+		return 0, err
+	}
 	query := `
 		SELECT COUNT(*)
 		FROM proxies p
@@ -540,6 +609,9 @@ func (h *HealthChecker) CountOrphanIdleProxies(ctx context.Context) (int, error)
 			WHERE ppm.proxy_id = p.id
 		)
 	`
+	if cond := lastCheckTTLCond(settings.IdleTTLMinutes); cond != "" {
+		query += "AND " + cond
+	}
 	var total int
 	if err := h.proxyRepo.GetDB().Pool.QueryRow(ctx, query).Scan(&total); err != nil {
 		return 0, fmt.Errorf("failed to count orphan idle proxies: %w", err)
@@ -549,27 +621,17 @@ func (h *HealthChecker) CountOrphanIdleProxies(ctx context.Context) (int, error)
 
 // CheckOrphanIdleProxiesWithProgress tests orphan proxies with status idle,
 // reporting progress after each proxy. immediate follows the same semantics as
-// CheckAllProxiesWithProgress.
+// CheckAllProxiesWithProgress. jobID identifies this run in the in-flight
+// dedup registry ("" outside a job).
 func (h *HealthChecker) CheckOrphanIdleProxiesWithProgress(
 	ctx context.Context,
 	onProgress func(checked, active, failed int),
 	immediate bool,
+	jobID string,
 ) ([]models.ProxyTestResult, error) {
-	// Load and cache settings under the lock (AUD-8).
-	all, err := h.settingsRepo.GetAll(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w", err)
-	}
-	settings := &all.HealthCheck
-	h.setSettings(settings)
-
-	proxies, err := h.ListOrphanIdleProxies(ctx)
+	settings, err := h.loadSettings(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(proxies) == 0 {
-		return []models.ProxyTestResult{}, nil
 	}
 
 	workers := settings.Workers
@@ -579,57 +641,40 @@ func (h *HealthChecker) CheckOrphanIdleProxiesWithProgress(
 			"configured_workers", settings.Workers, "fallback_workers", workers)
 	}
 
-	h.logger.Info("starting orphan idle health check", "proxy_count", len(proxies), "workers", workers)
+	h.logger.Info("starting orphan idle health check", "workers", workers, "batch_size", hcBatchSize)
+	startedAt := time.Now()
 
-	wp := workerpool.New(workers)
-	results := make([]models.ProxyTestResult, len(proxies))
-	var statsMu sync.Mutex
-	checked := 0
-	active := 0
-	failed := 0
-
-	for i, proxy := range proxies {
-		idx := i
-		p := proxy
-		wp.Submit(func() {
-			result, err := h.CheckProxy(ctx, p, immediate)
-			statsMu.Lock()
-			defer statsMu.Unlock()
-			if err != nil {
-				h.logger.Error("orphan idle health check error",
-					"proxy_id", p.ID,
-					"proxy_address", p.Address,
-					"error", err,
-				)
-				results[idx] = models.ProxyTestResult{
-					ID:       p.ID,
-					Address:  p.Address,
-					Status:   "failed",
-					TestedAt: time.Now(),
-				}
-				errMsg := err.Error()
-				results[idx].Error = &errMsg
-				failed++
-			} else {
-				results[idx] = *result
-				if result.Status == "active" {
-					active++
-				} else {
-					failed++
-				}
-			}
-			checked++
-			if onProgress != nil {
-				onProgress(checked, active, failed)
-			}
-		})
+	results, skipped, err := h.runCheckedBatches(ctx, h.listOrphanIdleBatch, onProgress, immediate, workers,
+		"orphan idle health check", jobID)
+	if err != nil {
+		return nil, err
 	}
+	h.drainResults(ctx)
 
-	wp.StopWait()
-
-	h.logger.Info("orphan idle health check completed", "proxy_count", len(proxies))
+	h.logger.Info("orphan idle health check completed",
+		"checked", len(results),
+		"skipped_inflight", skipped,
+		"throughput_per_s", ChecksPerSecond(len(results), time.Since(startedAt)),
+		"idle_ttl_minutes", settings.IdleTTLMinutes,
+	)
 
 	return results, nil
+}
+
+// drainResults flushes buffered check results before a bulk run finishes, so
+// a job's finish state reflects every result it produced.
+func (h *HealthChecker) drainResults(ctx context.Context) {
+	if h.results != nil {
+		h.results.Drain(ctx)
+	}
+}
+
+// ChecksPerSecond returns a coarse checks/s throughput figure for job logs.
+func ChecksPerSecond(checked int, elapsed time.Duration) int {
+	if checked <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return int(float64(checked) / elapsed.Seconds())
 }
 
 // createTransport creates an HTTP transport for the proxy

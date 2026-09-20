@@ -58,7 +58,19 @@ type HealthCheckSettings struct {
 	Status    int      `json:"status"`
 	Headers   []string `json:"headers"`
 	StrictTLS bool     `json:"strict_tls"` // Enable real TLS certificate validation during health checks
+	// OrphanTTLMinutes excludes orphan proxies checked more recently than
+	// now()-TTL from periodic orphan sweeps (0 disables the filter).
+	OrphanTTLMinutes int `json:"orphan_ttl_minutes"`
+	// IdleTTLMinutes is the same TTL filter for idle-orphan sweeps.
+	IdleTTLMinutes int `json:"idle_ttl_minutes"`
 }
+
+// Default health-check TTLs (minutes). Conservative: 6h for orphan sweeps,
+// 24h for idle sweeps. 0 explicitly disables the TTL filter.
+const (
+	DefaultOrphanTTLMinutes = 360
+	DefaultIdleTTLMinutes   = 1440
+)
 
 // GlobalHealthCheckSettings represents the scheduled global (orphan) health
 // check: proxies not attached to any pool are checked on this interval.

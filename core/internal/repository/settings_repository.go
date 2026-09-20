@@ -140,11 +140,13 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"max_requests": 100,
 		},
 		"healthcheck": {
-			"timeout": 60,
-			"workers": 20,
-			"url":     "https://api.ipify.org",
-			"status":  200,
-			"headers": []string{"User-Agent: Rota-HealthCheck/1.0"},
+			"timeout":            60,
+			"workers":            20,
+			"url":                "https://api.ipify.org",
+			"status":             200,
+			"headers":            []string{"User-Agent: Rota-HealthCheck/1.0"},
+			"orphan_ttl_minutes": models.DefaultOrphanTTLMinutes,
+			"idle_ttl_minutes":   models.DefaultIdleTTLMinutes,
 		},
 		"global_health_check": {
 			"enabled":          true,
@@ -188,6 +190,20 @@ func (r *SettingsRepository) mapToSettings(m map[string]map[string]any) (*models
 
 	if err := json.Unmarshal(settingsJSON, settings); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal settings: %w", err)
+	}
+
+	// Health-check TTLs: rows created before migration 27 (or reset payloads
+	// without the keys) keep the conservative defaults; an explicit 0 stored
+	// in the DB disables the filter and is preserved.
+	if settings.HealthCheck.OrphanTTLMinutes == 0 {
+		if hc, ok := m["healthcheck"]; !ok || hc["orphan_ttl_minutes"] == nil {
+			settings.HealthCheck.OrphanTTLMinutes = models.DefaultOrphanTTLMinutes
+		}
+	}
+	if settings.HealthCheck.IdleTTLMinutes == 0 {
+		if hc, ok := m["healthcheck"]; !ok || hc["idle_ttl_minutes"] == nil {
+			settings.HealthCheck.IdleTTLMinutes = models.DefaultIdleTTLMinutes
+		}
 	}
 
 	return settings, nil

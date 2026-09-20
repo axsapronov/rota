@@ -330,11 +330,12 @@ func (h *PoolHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
+	snap, _ := services.GetJobStore().Snapshot(job.ID)
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"job_id":   job.ID,
-		"pool_id":  id,
-		"total":    job.Total,
-		"status":   job.Status,
+		"job_id":  snap.ID,
+		"pool_id": id,
+		"total":   snap.Total,
+		"status":  snap.Status,
 	})
 }
 
@@ -342,7 +343,7 @@ func (h *PoolHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 func (h *PoolHandler) HealthCheckStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "job_id")
 	store := services.GetJobStore()
-	job, ok := store.Get(jobID)
+	job, ok := store.Snapshot(jobID)
 	if !ok {
 		http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
 		return
@@ -357,7 +358,7 @@ func (h *PoolHandler) HealthCheckJobs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
 		return
 	}
-	jobs := services.GetJobStore().ListByPool(id)
+	jobs := services.GetJobStore().ListByPoolCopies(id)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": jobs})
 }
 

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -42,6 +43,181 @@ const (
 // layer maps it to HTTP 429 (backpressure) instead of blocking.
 var ErrQueueFull = errors.New("health check queue is full")
 
+// maxJobResults bounds the per-proxy results kept in memory per job: a sweep
+// of 300k proxies must not pin 300k result structs. Only the most recent
+// failures are kept — they are what a user inspecting the job wants to see.
+const maxJobResults = 100
+
+// trimJobResults caps results at the most recent maxJobResults failures.
+// Aggregate counters (Total/Active/Failed) are computed separately and are
+// unaffected; the JSON shape of the results field is unchanged.
+func trimJobResults(results []models.ProxyTestResult) []models.ProxyTestResult {
+	if len(results) <= maxJobResults {
+		return results
+	}
+	failures := make([]models.ProxyTestResult, 0, maxJobResults)
+	for i := len(results) - 1; i >= 0 && len(failures) < maxJobResults; i-- {
+		if results[i].Status != "active" {
+			failures = append(failures, results[i])
+		}
+	}
+	out := make([]models.ProxyTestResult, 0, len(failures))
+	for i := len(failures) - 1; i >= 0; i-- {
+		out = append(out, failures[i])
+	}
+	return out
+}
+
+// hcPriority orders health-check jobs in the queue: smaller runs first.
+type hcPriority int
+
+const (
+	hcPriorityHigh   hcPriority = iota // pool checks, selected-proxy tests
+	hcPriorityMedium                   // periodic orphan sweeps
+	hcPriorityLow                      // idle sweeps, force cleanup
+)
+
+// hcAgingAfter is how long a LOW job may wait before it is promoted ahead of
+// newly enqueued MEDIUM/LOW jobs, so a long-queued low-priority sweep is not
+// starved by a steady stream of new medium-priority work.
+const hcAgingAfter = 15 * time.Minute
+
+// hcPriorityForKind maps a job kind to its queue priority.
+func hcPriorityForKind(kind HCJobKind) hcPriority {
+	switch kind {
+	case HCJobKindPool, HCJobKindProxy:
+		return hcPriorityHigh
+	case HCJobKindOrphan:
+		return hcPriorityMedium
+	default: // HCJobKindIdle, HCJobKindForceCleanup
+		return hcPriorityLow
+	}
+}
+
+// hcConsumerClass identifies which priority band a consumer drains.
+type hcConsumerClass int
+
+const (
+	consumerHigh   hcConsumerClass = iota // HIGH only
+	consumerMedLow                        // MEDIUM and LOW
+)
+
+func (c hcConsumerClass) String() string {
+	if c == consumerHigh {
+		return "high"
+	}
+	return "medium-low"
+}
+
+// matches reports whether a (possibly aged) priority belongs to the class.
+func (c hcConsumerClass) matches(p hcPriority) bool {
+	if c == consumerHigh {
+		return p == hcPriorityHigh
+	}
+	return p == hcPriorityMedium || p == hcPriorityLow
+}
+
+// hcQueueItem is one enqueued job.
+type hcQueueItem struct {
+	id         string
+	priority   hcPriority
+	enqueuedAt time.Time
+	index      int // container/heap bookkeeping
+}
+
+// effectivePriority applies aging: a LOW item older than hcAgingAfter is
+// treated as MEDIUM. Effective keys only ever increase (LOW -> MEDIUM), which
+// preserves the min-heap invariant, so aging can be evaluated lazily in Less.
+func (i hcQueueItem) effectivePriority(now time.Time) hcPriority {
+	if i.priority == hcPriorityLow && now.Sub(i.enqueuedAt) > hcAgingAfter {
+		return hcPriorityMedium
+	}
+	return i.priority
+}
+
+// hcPriorityQueue is a bounded min-heap of enqueued job ids ordered by
+// (effective priority, enqueuedAt). Two consumers wait on the same cond
+// variable and each takes only items of its class, so a HIGH job is never
+// held behind a long MEDIUM/LOW sweep (head-of-line blocking).
+type hcPriorityQueue struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	items    []hcQueueItem
+	capacity int
+	now      func() time.Time
+}
+
+func newHCPriorityQueue(capacity int, now func() time.Time) *hcPriorityQueue {
+	if now == nil {
+		now = time.Now
+	}
+	q := &hcPriorityQueue{capacity: capacity, now: now}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *hcPriorityQueue) Len() int { return len(q.items) }
+
+func (q *hcPriorityQueue) Swap(i, j int) {
+	q.items[i], q.items[j] = q.items[j], q.items[i]
+	q.items[i].index = i
+	q.items[j].index = j
+}
+
+func (q *hcPriorityQueue) Less(i, j int) bool {
+	a, b := q.items[i], q.items[j]
+	pa, pb := a.effectivePriority(q.now()), b.effectivePriority(q.now())
+	if pa != pb {
+		return pa < pb
+	}
+	return a.enqueuedAt.Before(b.enqueuedAt)
+}
+
+func (q *hcPriorityQueue) Push(x any) {
+	item := x.(hcQueueItem)
+	item.index = len(q.items)
+	q.items = append(q.items, item)
+}
+
+func (q *hcPriorityQueue) Pop() any {
+	n := len(q.items)
+	item := q.items[n-1]
+	q.items[n-1] = hcQueueItem{}
+	q.items = q.items[:n-1]
+	return item
+}
+
+// enqueue adds an item without blocking. It reports false when the queue is at
+// capacity (the caller maps that to ErrQueueFull / HTTP 429).
+func (q *hcPriorityQueue) enqueue(id string, priority hcPriority, at time.Time) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) >= q.capacity {
+		return false
+	}
+	heap.Push(q, hcQueueItem{id: id, priority: priority, enqueuedAt: at})
+	q.cond.Broadcast()
+	return true
+}
+
+// popIf blocks until an item of the consumer's class is at the head of the
+// heap, then removes and returns it. It reports false when ctx is done.
+func (q *hcPriorityQueue) popIf(ctx context.Context, class hcConsumerClass) (hcQueueItem, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for {
+		// Checked first, on every wake-up: once the context is done the
+		// consumer takes no more items, even if one is enqueued.
+		if ctx.Err() != nil {
+			return hcQueueItem{}, false
+		}
+		if len(q.items) > 0 && class.matches(q.items[0].effectivePriority(q.now())) {
+			return heap.Pop(q).(hcQueueItem), true
+		}
+		q.cond.Wait()
+	}
+}
+
 // Injection interfaces. HealthChecker is passed as one of these and the
 // concrete capabilities are detected via type assertion, so the queue layer
 // stays decoupled from the proxy package.
@@ -50,11 +226,11 @@ type orphanChecker interface {
 }
 
 // orphanCheckerWithProgress matches HealthChecker.CheckAllProxiesWithProgress.
-// The third (immediate) parameter is required: periodic scheduler runs use
+// The immediate parameter is required: periodic scheduler runs use
 // immediate=false (consecutive-failure hysteresis), user-initiated runs use
-// immediate=true.
+// immediate=true. jobID feeds the in-flight dedup registry.
 type orphanCheckerWithProgress interface {
-	CheckAllProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+	CheckAllProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool, jobID string) ([]models.ProxyTestResult, error)
 }
 
 type orphanCounter interface {
@@ -66,13 +242,13 @@ type idleOrphanCounter interface {
 }
 
 type idleOrphanCheckerWithProgress interface {
-	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool, jobID string) ([]models.ProxyTestResult, error)
 }
 
 // proxyIDsCheckerWithProgress matches HealthChecker.CheckProxiesWithProgress
 // (user-initiated bulk health check of selected proxies).
 type proxyIDsCheckerWithProgress interface {
-	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool, jobID string) ([]models.ProxyTestResult, error)
 }
 
 // HCJob holds state for one async health-check run
@@ -96,17 +272,18 @@ type HCJob struct {
 	// Full results (populated when done)
 	Results []models.ProxyTestResult `json:"results,omitempty"`
 
-	// run is the job's runner, invoked by the single queue consumer.
+	// run is the job's runner, invoked by the queue consumers.
 	run func(*HCJobStore, *HCJob)
 }
 
-// HCJobStore keeps an in-memory map of recent jobs (TTL 30 min) plus a single
-// FIFO queue consumed by one goroutine. The queue provides backpressure: when
-// it is full, new jobs are rejected (ErrQueueFull) rather than blocking.
+// HCJobStore keeps an in-memory map of recent jobs (TTL 30 min) plus a bounded
+// priority queue drained by two consumers (HIGH-only and MEDIUM/LOW). The
+// queue provides backpressure: when it is at capacity, new jobs are rejected
+// (ErrQueueFull) rather than blocking.
 type HCJobStore struct {
 	mu        sync.RWMutex
 	jobs      map[string]*HCJob
-	queue     chan string
+	queue     *hcPriorityQueue
 	startOnce sync.Once
 	ctx       context.Context
 	logger    *logger.Logger
@@ -121,33 +298,37 @@ func GetJobStore() *HCJobStore {
 	return globalJobStore
 }
 
+// hcQueueCapacity is the total queue capacity shared by both consumers.
+const hcQueueCapacity = 2048
+
 // newHCJobStore builds a store with a bounded queue for tests. The production
 // singleton uses the default queue capacity set in Start.
 func newHCJobStore(queueCap int) *HCJobStore {
 	return &HCJobStore{
 		jobs:  make(map[string]*HCJob),
-		queue: make(chan string, queueCap),
+		queue: newHCPriorityQueue(queueCap, time.Now),
 	}
 }
 
-// Start initializes the queue consumer once. The consumer lives for the given
-// context's lifetime (wired to the service context in server.go so it stops on
-// shutdown). If a queue was pre-created (test store) it is reused.
+// Start initializes the queue consumers once. Both consumers live for the
+// given context's lifetime (wired to the service context in server.go so they
+// stop on shutdown). If a queue was pre-created (test store) it is reused.
 func (s *HCJobStore) Start(ctx context.Context, log *logger.Logger) {
 	s.startOnce.Do(func() {
 		s.ctx = ctx
 		s.logger = log
 		if s.queue == nil {
-			s.queue = make(chan string, 2048)
+			s.queue = newHCPriorityQueue(hcQueueCapacity, time.Now)
 		}
-		go s.runConsumerLoop()
+		go s.runConsumerLoop(consumerHigh)
+		go s.runConsumerLoop(consumerMedLow)
 	})
 }
 
-// runConsumerLoop runs the consumer, restarting it if it exits for any reason
+// runConsumerLoop runs one consumer, restarting it if it exits for any reason
 // other than the context being done. On an unexpected exit, in-flight (running)
 // jobs are requeued so they are not lost.
-func (s *HCJobStore) runConsumerLoop() {
+func (s *HCJobStore) runConsumerLoop(class hcConsumerClass) {
 	first := true
 	for {
 		if s.ctx.Err() != nil {
@@ -157,12 +338,13 @@ func (s *HCJobStore) runConsumerLoop() {
 			s.requeueInterruptedJobs()
 		}
 		first = false
-		s.consume(s.ctx)
+		s.consume(s.ctx, class)
 		if s.ctx.Err() != nil {
 			return
 		}
 		if s.logger != nil {
-			s.logger.Warn("health check queue consumer exited unexpectedly, restarting", "delay", "1s")
+			s.logger.Warn("health check queue consumer exited unexpectedly, restarting",
+				"class", class.String(), "delay", "1s")
 		}
 		time.Sleep(time.Second)
 	}
@@ -189,7 +371,7 @@ func (s *HCJobStore) Create(kind HCJobKind, poolID int, poolName, checkURL strin
 	s.jobs[job.ID] = job
 	s.mu.Unlock()
 
-	if !s.enqueue(job.ID) {
+	if !s.enqueue(job.ID, hcPriorityForKind(kind)) {
 		s.mu.Lock()
 		delete(s.jobs, job.ID)
 		s.mu.Unlock()
@@ -201,40 +383,40 @@ func (s *HCJobStore) Create(kind HCJobKind, poolID int, poolName, checkURL strin
 	return job, nil
 }
 
-// enqueue pushes a job id onto the queue without blocking. It reports whether
-// the enqueue succeeded (false when the queue is nil or full).
-func (s *HCJobStore) enqueue(jobID string) bool {
+// enqueue pushes a job id onto the priority queue without blocking. It
+// reports whether the enqueue succeeded (false when the queue is nil or full).
+func (s *HCJobStore) enqueue(jobID string, prio hcPriority) bool {
 	if s.queue == nil {
 		return false
 	}
-	select {
-	case s.queue <- jobID:
-		return true
-	default:
-		return false
-	}
+	return s.queue.enqueue(jobID, prio, time.Now())
 }
 
-// requeueInterruptedJobs puts running jobs back on the queue after the consumer
-// goroutine exits, so an interrupted run is retried rather than dropped.
+// requeueInterruptedJobs puts running jobs back on the queue after a consumer
+// goroutine exits, so an interrupted run is retried rather than dropped. The
+// status flip to pending happens under the same lock as the collection, so a
+// job is requeued at most once even if both consumers restart concurrently.
 func (s *HCJobStore) requeueInterruptedJobs() {
 	if s.queue == nil {
 		return
 	}
-	s.mu.RLock()
-	ids := make([]string, 0)
+	s.mu.Lock()
+	type requeuedJob struct {
+		id   string
+		kind HCJobKind
+	}
+	ids := make([]requeuedJob, 0)
 	for id, j := range s.jobs {
 		if j.Status == HCJobRunning {
-			ids = append(ids, id)
+			j.Status = HCJobPending
+			j.UpdatedAt = time.Now()
+			ids = append(ids, requeuedJob{id: id, kind: j.Kind})
 		}
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
-	for _, id := range ids {
-		s.Update(id, func(j *HCJob) {
-			j.Status = HCJobPending
-		})
-		s.enqueue(id)
+	for _, rj := range ids {
+		s.enqueue(rj.id, hcPriorityForKind(rj.kind))
 	}
 }
 
@@ -244,6 +426,20 @@ func (s *HCJobStore) Get(id string) (*HCJob, bool) {
 	defer s.mu.RUnlock()
 	j, ok := s.jobs[id]
 	return j, ok
+}
+
+// Snapshot returns a consistent copy of a job under the store lock. The live
+// record is mutated by the queue consumers, so API handlers must read fields
+// from this copy, not from the shared pointer Get returns.
+func (s *HCJobStore) Snapshot(id string) (HCJob, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return HCJob{}, false
+	}
+	cp := *j
+	return cp, true
 }
 
 // Update mutates a job (caller must hold no lock)
@@ -301,6 +497,24 @@ func (s *HCJobStore) QueuePending() int {
 	return total
 }
 
+// ListByPoolCopies returns copies of all jobs for a pool (newest first),
+// taken under the store lock: safe to marshal, since the live records keep
+// being mutated by the queue consumers.
+func (s *HCJobStore) ListByPoolCopies(poolID int) []HCJob {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []HCJob
+	for _, j := range s.jobs {
+		if j.PoolID == poolID {
+			out = append(out, *j)
+		}
+	}
+	sort.Slice(out, func(i, k int) bool {
+		return out[i].StartedAt.After(out[k].StartedAt)
+	})
+	return out
+}
+
 // ListByPool returns all jobs for a given pool (newest first)
 func (s *HCJobStore) ListByPool(poolID int) []*HCJob {
 	s.mu.RLock()
@@ -334,6 +548,48 @@ func (s *HCJobStore) ListByKind(kind HCJobKind) []*HCJob {
 	return out
 }
 
+// FindActiveCovering returns the most recent pending/running proxy job whose
+// ProxyIDs cover every requested id, for the bulk "test selected" guard: a
+// repeat request for a subset of an in-flight selection returns the existing
+// job instead of queueing a duplicate sweep.
+func (s *HCJobStore) FindActiveCovering(proxyIDs []int) (*HCJob, bool) {
+	if len(proxyIDs) == 0 {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *HCJob
+	for _, j := range s.jobs {
+		if j.Kind != HCJobKindProxy {
+			continue
+		}
+		if j.Status != HCJobPending && j.Status != HCJobRunning {
+			continue
+		}
+		if best != nil && !j.StartedAt.After(best.StartedAt) {
+			continue
+		}
+		if idsCover(j.ProxyIDs, proxyIDs) {
+			best = j
+		}
+	}
+	return best, best != nil
+}
+
+// idsCover reports whether have contains every id in want.
+func idsCover(have, want []int) bool {
+	set := make(map[int]struct{}, len(have))
+	for _, id := range have {
+		set[id] = struct{}{}
+	}
+	for _, id := range want {
+		if _, ok := set[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // FindActiveByKind returns the most recent pending/running job of the given
 // kind, for in-flight guards (e.g. rejecting a second force cleanup while one
 // is already queued/running).
@@ -355,30 +611,30 @@ func (s *HCJobStore) FindActiveByKind(kind HCJobKind) (*HCJob, bool) {
 	return best, best != nil
 }
 
-// consume pulls job ids off the queue and runs them. A panic in the consumer
-// itself is recovered (logged) so the runConsumerLoop restart path takes over.
-func (s *HCJobStore) consume(ctx context.Context) {
+// consume pulls job ids off the priority queue and runs them, taking only
+// items of this consumer's class. A panic in the consumer itself is recovered
+// (logged) so the runConsumerLoop restart path takes over.
+func (s *HCJobStore) consume(ctx context.Context, class hcConsumerClass) {
 	defer func() {
 		if r := recover(); r != nil {
 			if s.logger != nil {
-				s.logger.Error("health check queue consumer panicked", "error", r)
+				s.logger.Error("health check queue consumer panicked", "class", class.String(), "error", r)
 			}
 		}
 	}()
 	for {
-		select {
-		case <-ctx.Done():
+		item, ok := s.queue.popIf(ctx, class)
+		if !ok {
 			return
-		case jobID := <-s.queue:
-			job, ok := s.Get(jobID)
-			if !ok || job == nil || job.run == nil {
-				continue
-			}
-			s.Update(job.ID, func(j *HCJob) {
-				j.Status = HCJobRunning
-			})
-			s.runJob(job)
 		}
+		job, found := s.Get(item.id)
+		if !found || job == nil || job.run == nil {
+			continue
+		}
+		s.Update(job.ID, func(j *HCJob) {
+			j.Status = HCJobRunning
+		})
+		s.runJob(job)
 	}
 }
 
@@ -452,6 +708,7 @@ func RunPoolHealthCheckAsync(
 					j.Failed = failed
 				})
 			},
+			job.ID,
 		)
 		if err != nil {
 			store.finishFailed(job.ID, err)
@@ -462,7 +719,7 @@ func RunPoolHealthCheckAsync(
 			j.Active = result.Active
 			j.Failed = result.Failed
 			j.Progress = result.Checked
-			j.Results = result.Results
+			j.Results = trimJobResults(result.Results)
 		})
 		store.finishDone(job.ID)
 	})
@@ -500,7 +757,7 @@ func RunOrphanHealthCheckAsync(ctx context.Context, hc orphanChecker, immediate 
 					j.Active = active
 					j.Failed = failed
 				})
-			}, immediate)
+			}, immediate, job.ID)
 		} else {
 			results, runErr = hc.CheckAllProxies(context.Background())
 		}
@@ -522,7 +779,7 @@ func RunOrphanHealthCheckAsync(ctx context.Context, hc orphanChecker, immediate 
 			j.Progress = len(results)
 			j.Active = active
 			j.Failed = failed
-			j.Results = results
+			j.Results = trimJobResults(results)
 		})
 		store.finishDone(job.ID)
 	})
@@ -553,7 +810,7 @@ func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWith
 				j.Active = active
 				j.Failed = failed
 			})
-		}, immediate)
+		}, immediate, job.ID)
 		if runErr != nil {
 			store.finishFailed(job.ID, runErr)
 			return
@@ -572,7 +829,7 @@ func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWith
 			j.Progress = len(results)
 			j.Active = active
 			j.Failed = failed
-			j.Results = results
+			j.Results = trimJobResults(results)
 		})
 		store.finishDone(job.ID)
 	})
@@ -598,6 +855,12 @@ func RunProxyHealthCheckAsync(
 		workers = 20
 	}
 
+	// Bulk guard: if an in-flight proxy sweep already covers every requested
+	// id, return it instead of queueing a duplicate.
+	if existing, ok := store.FindActiveCovering(proxyIDs); ok {
+		return existing, nil
+	}
+
 	job, err := store.Create(HCJobKindProxy, 0, "Selected proxies", "", workers, proxyIDs, func(store *HCJobStore, job *HCJob) {
 		results, runErr := hc.CheckProxiesWithProgress(context.Background(), job.ProxyIDs, func(checked, active, failed int) {
 			store.Update(job.ID, func(j *HCJob) {
@@ -605,7 +868,7 @@ func RunProxyHealthCheckAsync(
 				j.Active = active
 				j.Failed = failed
 			})
-		}, true)
+		}, true, job.ID)
 		if runErr != nil {
 			store.finishFailed(job.ID, runErr)
 			return
@@ -624,7 +887,7 @@ func RunProxyHealthCheckAsync(
 			j.Progress = len(results)
 			j.Active = active
 			j.Failed = failed
-			j.Results = results
+			j.Results = trimJobResults(results)
 		})
 		store.finishDone(job.ID)
 	})

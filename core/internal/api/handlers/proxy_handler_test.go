@@ -396,6 +396,83 @@ func TestProxyHandlerTestBulk(t *testing.T) {
 	}
 }
 
+// TestProxyHandlerTestBulk_DuplicateReturnsExistingJob verifies the bulk
+// guard: a second request whose ids are covered by an in-flight proxy job
+// returns that job instead of queueing a duplicate.
+func TestProxyHandlerTestBulk_DuplicateReturnsExistingJob(t *testing.T) {
+	pool := openHandlerTestDB(t)
+	ctx := context.Background()
+	handler := newTestProxyHandler(t, pool)
+	ensureGlobalJobStoreQueue(t)
+
+	const prefix = "bulk-dup-"
+	if _, err := pool.Exec(ctx, `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%"); err != nil {
+		t.Fatalf("clean proxies: %v", err)
+	}
+	var ids []int
+	for i := 0; i < 2; i++ {
+		var id int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO proxies (address, protocol, status) VALUES ($1, 'http', 'active') RETURNING id`,
+			fmt.Sprintf("%s%d.invalid:8080", prefix, i),
+		).Scan(&id); err != nil {
+			t.Fatalf("insert proxy %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%") //nolint:errcheck
+	})
+
+	store := services.GetJobStore()
+	// An in-flight proxy sweep already covers both ids.
+	existing, err := store.Create(services.HCJobKindProxy, 0, "Selected proxies", "", 2, ids,
+		func(s *services.HCJobStore, job *services.HCJob) {})
+	if err != nil {
+		t.Fatalf("create existing job: %v", err)
+	}
+	store.Update(existing.ID, func(j *services.HCJob) { j.Status = services.HCJobRunning })
+	t.Cleanup(func() {
+		now := time.Now()
+		store.Update(existing.ID, func(j *services.HCJob) {
+			j.Status = services.HCJobDone
+			j.FinishedAt = &now
+		})
+	})
+
+	r := chi.NewRouter()
+	r.Post("/proxies/test/bulk", handler.TestBulk)
+
+	body, _ := json.Marshal(models.BulkTestProxyRequest{ProxyIDs: ids, Workers: 2})
+	req := httptest.NewRequest(http.MethodPost, "/proxies/test/bulk", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&start); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if start.JobID != existing.ID {
+		t.Fatalf("job_id = %s, want the existing in-flight job %s", start.JobID, existing.ID)
+	}
+
+	// No duplicate was queued: exactly one active proxy job exists.
+	active := 0
+	for _, j := range store.ListByKind(services.HCJobKindProxy) {
+		snap, _ := store.Snapshot(j.ID)
+		if snap.Status == services.HCJobPending || snap.Status == services.HCJobRunning {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active proxy jobs = %d, want 1 (duplicate not queued)", active)
+	}
+}
+
 // TestProxyHandlerCleanupNow verifies the manual cleanup endpoint: it deletes
 // failed proxies older than max_failed_days (ignoring the Enabled flag) and
 // returns the deleted count.

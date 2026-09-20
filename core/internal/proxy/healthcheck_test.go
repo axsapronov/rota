@@ -109,6 +109,7 @@ func TestHealthCheckStrictTLS(t *testing.T) {
 
 	h := &HealthChecker{
 		tracker: NewUsageTracker(repository.NewProxyRepository(&database.DB{Pool: pool})),
+		results: NewResultWriter(repository.NewProxyRepository(&database.DB{Pool: pool}), logger.New("error")),
 		logger:  logger.New("error"),
 	}
 
@@ -162,6 +163,7 @@ func newTestHealthChecker(t *testing.T, db *testDB) *HealthChecker {
 	return &HealthChecker{
 		proxyRepo: db.Repo,
 		tracker:   db.Tracker,
+		results:   NewResultWriter(db.Repo, logger.New("error")),
 		logger:    logger.New("error"),
 	}
 }
@@ -319,6 +321,7 @@ func TestOrphanHealthCheckFilter(t *testing.T) {
 		proxyRepo:    db.Repo,
 		settingsRepo: settingsRepo,
 		tracker:      db.Tracker,
+		results:      NewResultWriter(db.Repo, logger.New("error")),
 		logger:       logger.New("error"),
 	}
 
@@ -358,7 +361,7 @@ func TestOrphanHealthCheckFilter(t *testing.T) {
 	}
 
 	// CheckAllProxiesWithProgress must check the orphan and skip the pool proxy.
-	results, err := h.CheckAllProxiesWithProgress(ctx, nil, false)
+	results, err := h.CheckAllProxiesWithProgress(ctx, nil, false, "")
 	if err != nil {
 		t.Fatalf("CheckAllProxiesWithProgress: %v", err)
 	}
@@ -376,5 +379,340 @@ func TestOrphanHealthCheckFilter(t *testing.T) {
 	}
 	if foundPool {
 		t.Fatal("pool proxy must not be checked by CheckAllProxiesWithProgress")
+	}
+}
+
+// TestBatchCheckResultsMatchSequential verifies the batched result writer is
+// equivalent to the sequential RecordHealthCheck/RecordManualTestResult writes
+// on the same record sequences: same final status, failed_requests and
+// last_error for periodic hysteresis, immediate manual/pool semantics, and
+// mixed windows.
+func TestBatchCheckResultsMatchSequential(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	rec := func(id int, success bool, kind CheckResultKind) CheckResultRecord {
+		return CheckResultRecord{ProxyID: id, Success: success, Kind: kind, LastError: "boom", Timestamp: now}
+	}
+
+	type seq struct {
+		name string
+		init string // initial status of both proxies
+		recs []CheckResultRecord
+	}
+	seqs := []seq{
+		{"three periodic fails flip to failed", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic), rec(1, false, KindPeriodic), rec(1, false, KindPeriodic),
+		}},
+		{"two fails then success resets", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic), rec(1, false, KindPeriodic), rec(1, true, KindPeriodic),
+		}},
+		{"success mid window then trailing fails", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic), rec(1, true, KindPeriodic),
+			rec(1, false, KindPeriodic), rec(1, false, KindPeriodic), rec(1, false, KindPeriodic),
+		}},
+		{"single periodic fail keeps status", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic),
+		}},
+		{"manual fail is immediate", "active", []CheckResultRecord{
+			rec(1, false, KindManual),
+		}},
+		{"pool fail is immediate", "active", []CheckResultRecord{
+			rec(1, false, KindPool),
+		}},
+		{"pool success reactivates", "failed", []CheckResultRecord{
+			rec(1, true, KindPool),
+		}},
+		{"mixed manual and periodic fails", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic), rec(1, false, KindManual), rec(1, false, KindPeriodic),
+		}},
+		{"manual success after periodic fails", "active", []CheckResultRecord{
+			rec(1, false, KindPeriodic), rec(1, false, KindPeriodic), rec(1, true, KindManual),
+		}},
+	}
+
+	for _, s := range seqs {
+		t.Run(s.name, func(t *testing.T) {
+			baseID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8095), s.init)
+			batchID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8096), s.init)
+			t.Cleanup(func() {
+				db.Pool.Exec(context.Background(),
+					`DELETE FROM proxies WHERE id IN ($1, $2)`, baseID, batchID)
+			})
+
+			// Sequential baseline.
+			for i, r := range s.recs {
+				switch r.Kind {
+				case KindPeriodic:
+					if err := db.Tracker.RecordHealthCheck(ctx, baseID, r.Success, 10, r.LastError); err != nil {
+						t.Fatalf("sequential RecordHealthCheck #%d: %v", i, err)
+					}
+				default: // manual and pool share the immediate semantics
+					if err := db.Tracker.RecordManualTestResult(ctx, baseID, r.Success, r.LastError); err != nil {
+						t.Fatalf("sequential RecordManualTestResult #%d: %v", i, err)
+					}
+				}
+			}
+
+			// Batched path.
+			w := NewResultWriter(db.Repo, logger.New("error"))
+			for i := range s.recs {
+				r := s.recs[i]
+				w.Record(CheckResultRecord{ProxyID: batchID, Success: r.Success, Kind: r.Kind, LastError: r.LastError, Timestamp: r.Timestamp})
+			}
+			w.Drain(ctx)
+			w.Stop()
+
+			base := readProxyRow(t, db.Pool, baseID)
+			batch := readProxyRow(t, db.Pool, batchID)
+			if base.Status != batch.Status {
+				t.Errorf("status: batch = %q, sequential = %q", batch.Status, base.Status)
+			}
+			if base.FailedRequests != batch.FailedRequests {
+				t.Errorf("failed_requests: batch = %d, sequential = %d", batch.FailedRequests, base.FailedRequests)
+			}
+			baseErr, batchErr := "", ""
+			if base.LastError != nil {
+				baseErr = *base.LastError
+			}
+			if batch.LastError != nil {
+				batchErr = *batch.LastError
+			}
+			if baseErr != batchErr {
+				t.Errorf("last_error: batch = %q, sequential = %q", batchErr, baseErr)
+			}
+		})
+	}
+}
+
+// TestResultWriterSurvivesClosedDB verifies the writer is resilient: records
+// queued around a dead database are flushed (the flush fails and is logged),
+// and neither Record nor Drain panics — so a job keeps running when the DB
+// goes away mid-run.
+func TestResultWriterSurvivesClosedDB(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8097), "active")
+	t.Cleanup(func() {
+		db.Pool.Exec(context.Background(), `DELETE FROM proxies WHERE id = $1`, id)
+	})
+
+	pool := db.Pool
+	repo := db.Repo
+	pool.Close() // kill the DB before the "job" runs
+
+	w := NewResultWriter(repo, logger.New("error"))
+	defer w.Stop()
+
+	for i := 0; i < 10; i++ {
+		w.Record(CheckResultRecord{ProxyID: id, Success: false, Kind: KindPeriodic, LastError: "db down", Timestamp: time.Now()})
+	}
+	w.Drain(ctx) // flush must fail gracefully, not panic
+	w.Record(CheckResultRecord{ProxyID: id, Success: true, Kind: KindPeriodic, Timestamp: time.Now()})
+	w.Drain(ctx)
+}
+
+// TestCheckAllProxiesKeysetPagination verifies the keyset sweep over more
+// than one batch (hcBatchSize = 1000): every inserted orphan is checked
+// exactly once (no duplicates, no skips) across 2500 rows.
+func TestCheckAllProxiesKeysetPagination(t *testing.T) {
+	db := openTestDB(t)
+	seedHealthCheckSetting(t, db.Pool)
+
+	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: db.Pool})
+	h := &HealthChecker{
+		proxyRepo:    db.Repo,
+		settingsRepo: settingsRepo,
+		tracker:      db.Tracker,
+		results:      NewResultWriter(db.Repo, logger.New("error")),
+		logger:       logger.New("error"),
+	}
+	// Fast, parallel checks against a dead port.
+	h.setSettings(&models.HealthCheckSettings{
+		Timeout: 1, Workers: 8, URL: "http://127.0.0.1:1", Status: http.StatusOK,
+	})
+
+	ctx := context.Background()
+	const total = 2500
+	runTag := mrand.Intn(100000)
+	prefix := fmt.Sprintf("ks-%d-", runTag)
+
+	// One multi-row INSERT for speed.
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO proxies (address, protocol, status) VALUES ")
+	for i := 0; i < total; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, "('%s%d.invalid:8080','http','idle')", prefix, i)
+	}
+	if _, err := db.Pool.Exec(ctx, sb.String()); err != nil {
+		t.Fatalf("insert keyset fixtures: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Pool.Exec(context.Background(),
+			`DELETE FROM proxies WHERE address LIKE $1`, prefix+"%")
+	})
+
+	var ids []int
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id FROM proxies WHERE address LIKE $1 ORDER BY id`, prefix+"%")
+	if err != nil {
+		t.Fatalf("read fixture ids: %v", err)
+	}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan fixture id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) != total {
+		t.Fatalf("fixture size = %d, want %d", len(ids), total)
+	}
+
+	results, err := h.CheckAllProxiesWithProgress(ctx, nil, false, "")
+	if err != nil {
+		t.Fatalf("CheckAllProxiesWithProgress: %v", err)
+	}
+
+	counts := make(map[int]int, len(results))
+	for _, r := range results {
+		counts[r.ID]++
+	}
+	var missing, duplicated []int
+	for _, id := range ids {
+		switch counts[id] {
+		case 0:
+			missing = append(missing, id)
+		case 1:
+		default:
+			duplicated = append(duplicated, id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("%d proxies were skipped (first: %d)", len(missing), missing[0])
+	}
+	if len(duplicated) > 0 {
+		t.Errorf("%d proxies were checked more than once (first: %d, count: %d)",
+			len(duplicated), duplicated[0], counts[duplicated[0]])
+	}
+}
+
+// TestOrphanHealthCheckTTLFilter verifies the TTL cutoff: a "fresh" orphan
+// (last_check inside the TTL window) is excluded from the sweep selection and
+// the counts, while a stale one (last_check older than the TTL) and an
+// unchecked one (last_check IS NULL) are included. ttl=0 disables the filter.
+func TestOrphanHealthCheckTTLFilter(t *testing.T) {
+	db := openTestDB(t)
+
+	// Upsert (not insert-if-missing) so the TTL values are deterministic.
+	upsertHealthCheckSetting := func(ttlMinutes int) {
+		t.Helper()
+		value := fmt.Sprintf(
+			`{"timeout": 1, "workers": 2, "url": "http://127.0.0.1:1", "status": 200, "headers": [], "orphan_ttl_minutes": %d, "idle_ttl_minutes": %d}`,
+			ttlMinutes, ttlMinutes,
+		)
+		if _, err := db.Pool.Exec(context.Background(), `
+			INSERT INTO settings (key, value) VALUES ('healthcheck', $1::jsonb)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+		`, value); err != nil {
+			t.Fatalf("upsert healthcheck setting: %v", err)
+		}
+	}
+	upsertHealthCheckSetting(60)
+
+	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: db.Pool})
+	h := &HealthChecker{
+		proxyRepo:    db.Repo,
+		settingsRepo: settingsRepo,
+		tracker:      db.Tracker,
+		results:      NewResultWriter(db.Repo, logger.New("error")),
+		logger:       logger.New("error"),
+	}
+
+	ctx := context.Background()
+	setLastCheck := func(id int, expr string) {
+		t.Helper()
+		if _, err := db.Pool.Exec(ctx,
+			`UPDATE proxies SET last_check = `+expr+` WHERE id = $1`, id); err != nil {
+			t.Fatalf("set last_check for %d: %v", id, err)
+		}
+	}
+
+	baseOrphan, err := h.CountOrphanProxies(ctx)
+	if err != nil {
+		t.Fatalf("baseline CountOrphanProxies: %v", err)
+	}
+	baseIdle, err := h.CountOrphanIdleProxies(ctx)
+	if err != nil {
+		t.Fatalf("baseline CountOrphanIdleProxies: %v", err)
+	}
+
+	freshID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8090), "idle")
+	staleID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8091), "idle")
+	nullID := insertTestProxy(t, db.Pool, uniqueProxyAddress(t, 8092), "idle")
+	setLastCheck(freshID, "NOW()")
+	setLastCheck(staleID, "NOW() - INTERVAL '2 hours'")
+	// nullID keeps last_check = NULL
+	t.Cleanup(func() {
+		db.Pool.Exec(context.Background(),
+			`DELETE FROM proxies WHERE id IN ($1, $2, $3)`, freshID, staleID, nullID)
+	})
+
+	afterOrphan, err := h.CountOrphanProxies(ctx)
+	if err != nil {
+		t.Fatalf("CountOrphanProxies: %v", err)
+	}
+	if afterOrphan-baseOrphan != 2 {
+		t.Fatalf("orphan count delta = %d, want 2 (stale + null; fresh excluded)", afterOrphan-baseOrphan)
+	}
+
+	afterIdle, err := h.CountOrphanIdleProxies(ctx)
+	if err != nil {
+		t.Fatalf("CountOrphanIdleProxies: %v", err)
+	}
+	if afterIdle-baseIdle != 2 {
+		t.Fatalf("idle orphan count delta = %d, want 2 (stale + null; fresh excluded)", afterIdle-baseIdle)
+	}
+
+	// The sweep checks exactly the stale and null proxies.
+	results, err := h.CheckOrphanIdleProxiesWithProgress(ctx, nil, false, "")
+	if err != nil {
+		t.Fatalf("CheckOrphanIdleProxiesWithProgress: %v", err)
+	}
+	checked := make(map[int]bool, len(results))
+	for _, r := range results {
+		checked[r.ID] = true
+	}
+	if !checked[staleID] || !checked[nullID] {
+		t.Fatal("stale and null proxies must be checked")
+	}
+	if checked[freshID] {
+		t.Fatal("fresh proxy (last_check inside the TTL window) must be skipped")
+	}
+
+	// The sweep refreshed last_check for the checked proxies; restore the TTL
+	// states and verify ttl=0 disables the filter: the fresh proxy reappears
+	// in the sweep (scoped assertion — global counts are affected by rows
+	// left in the shared test DB by other tests).
+	setLastCheck(freshID, "NOW()")
+	setLastCheck(staleID, "NOW() - INTERVAL '2 hours'")
+	setLastCheck(nullID, "NULL")
+	upsertHealthCheckSetting(0)
+
+	results, err = h.CheckOrphanIdleProxiesWithProgress(ctx, nil, false, "")
+	if err != nil {
+		t.Fatalf("CheckOrphanIdleProxiesWithProgress (ttl=0): %v", err)
+	}
+	checked = make(map[int]bool, len(results))
+	for _, r := range results {
+		checked[r.ID] = true
+	}
+	if !checked[freshID] {
+		t.Fatal("fresh proxy must be checked when the TTL filter is disabled (ttl=0)")
 	}
 }

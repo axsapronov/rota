@@ -66,6 +66,15 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		settings.GlobalHealthCheck.IntervalMinutes = 30
 	}
 
+	// Normalize unset (negative) health-check TTLs to the defaults; an explicit
+	// 0 disables the TTL filter and is preserved.
+	if settings.HealthCheck.OrphanTTLMinutes < 0 {
+		settings.HealthCheck.OrphanTTLMinutes = models.DefaultOrphanTTLMinutes
+	}
+	if settings.HealthCheck.IdleTTLMinutes < 0 {
+		settings.HealthCheck.IdleTTLMinutes = models.DefaultIdleTTLMinutes
+	}
+
 	h.jsonResponse(w, http.StatusOK, settings)
 }
 
@@ -106,6 +115,15 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// before validation, so a partial payload doesn't fail the interval check.
 	if settings.GlobalHealthCheck.IntervalMinutes <= 0 {
 		settings.GlobalHealthCheck.IntervalMinutes = 30
+	}
+
+	// Normalize unset (negative) health-check TTLs to the defaults before
+	// validation; 0 is a valid value that disables the TTL filter.
+	if settings.HealthCheck.OrphanTTLMinutes < 0 {
+		settings.HealthCheck.OrphanTTLMinutes = models.DefaultOrphanTTLMinutes
+	}
+	if settings.HealthCheck.IdleTTLMinutes < 0 {
+		settings.HealthCheck.IdleTTLMinutes = models.DefaultIdleTTLMinutes
 	}
 
 	// Validate settings
@@ -223,6 +241,14 @@ func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 	// Validate global (orphan) health check interval
 	if s.GlobalHealthCheck.IntervalMinutes < 1 || s.GlobalHealthCheck.IntervalMinutes > 1440 {
 		return fmt.Errorf("global_health_check.interval_minutes must be between 1 and 1440")
+	}
+
+	// Validate health-check TTLs (0 disables the filter)
+	if s.HealthCheck.OrphanTTLMinutes < 0 || s.HealthCheck.OrphanTTLMinutes > 10080 {
+		return fmt.Errorf("healthcheck.orphan_ttl_minutes must be between 0 and 10080")
+	}
+	if s.HealthCheck.IdleTTLMinutes < 0 || s.HealthCheck.IdleTTLMinutes > 10080 {
+		return fmt.Errorf("healthcheck.idle_ttl_minutes must be between 0 and 10080")
 	}
 
 	// Validate GeoIP provider

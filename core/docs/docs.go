@@ -1603,6 +1603,14 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "idle_ttl_minutes": {
+                    "description": "IdleTTLMinutes is the same TTL filter for idle-orphan sweeps.",
+                    "type": "integer"
+                },
+                "orphan_ttl_minutes": {
+                    "description": "OrphanTTLMinutes excludes orphan proxies checked more recently than now()-TTL from periodic orphan sweeps (0 disables the filter).",
+                    "type": "integer"
+                },
                 "status": {
                     "type": "integer"
                 },
