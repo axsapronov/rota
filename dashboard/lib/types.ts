@@ -96,6 +96,58 @@ export interface SystemMetrics {
     mem_alloc: number
     mem_sys: number
   }
+  // Optional background-pipeline sections (omitted by the API when the
+  // corresponding provider is not wired)
+  geo?: {
+    queue_pending: number
+    queued_in_memory: number
+    batch_requests_last_minute: number
+    batch_requests_limit: number
+    usage_percent_1m: number
+    ips_updated_last_10m: number
+  } | null
+  health_check?: {
+    queue_pending: number
+    processed_last_10m: number
+    checks_last_minute: number
+    success_percent_1m: number
+  } | null
+  global_health_check?: {
+    enabled: boolean
+    interval_minutes: number
+    is_running: boolean
+    last_started_at?: string | null
+    last_finished_at?: string | null
+    last_status: "idle" | "ok" | "error"
+    last_duration_ms: number
+    last_error?: string | null
+    next_run_at?: string | null
+    last_checked_proxies: number
+  } | null
+  cleanup?: {
+    log: {
+      enabled: boolean
+      last_run_at?: string | null
+      last_status: "idle" | "ok" | "error"
+      last_duration_ms: number
+      next_run_at?: string | null
+      retention_days: number
+      compression_after_days: number
+      last_error?: string | null
+    } | null
+    proxy: {
+      enabled: boolean
+      last_run_at?: string | null
+      last_status: "idle" | "ok" | "error"
+      last_duration_ms: number
+      next_run_at?: string | null
+      deleted_proxies: number
+      max_failed_days: number
+      min_success_rate: number
+      cleanup_interval_hours: number
+      last_error?: string | null
+    } | null
+  } | null
 }
 
 export interface Settings {

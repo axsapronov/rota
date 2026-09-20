@@ -132,6 +132,8 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	metricsHandler := handlers.NewMetricsHandler(log,
 		func() checkstats.Snapshot { return checkstats.BuildSnapshot(services.GetJobStore().QueuePending()) },
 		checkstats.GetGlobalHealthCheckSnapshot,
+		nil, // geo: wire after feature 03 (GeoIP batch enrichment) lands
+		checkstats.GetCleanupMetrics,
 	)
 	documentationHandler := handlers.NewDocumentationHandler()
 	sourceHandler := handlers.NewSourceHandler(sourceRepo, sourceSvc, log)

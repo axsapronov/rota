@@ -18,16 +18,37 @@ type MetricsHandler struct {
 	logger           *logger.Logger
 	hcProvider       func() checkstats.Snapshot
 	globalHCProvider func() checkstats.GlobalHealthCheckSnapshot
+	geoProvider      func() *GeoMetrics
+	cleanupProvider  func() *checkstats.CleanupMetrics
 }
 
 // NewMetricsHandler creates a new metrics handler. The provider functions are
-// optional (nil-safe) and supply the health-check stats sections.
-func NewMetricsHandler(log *logger.Logger, hcProvider func() checkstats.Snapshot, globalHCProvider func() checkstats.GlobalHealthCheckSnapshot) *MetricsHandler {
+// optional (nil-safe) and supply the background-pipeline stats sections.
+func NewMetricsHandler(
+	log *logger.Logger,
+	hcProvider func() checkstats.Snapshot,
+	globalHCProvider func() checkstats.GlobalHealthCheckSnapshot,
+	geoProvider func() *GeoMetrics,
+	cleanupProvider func() *checkstats.CleanupMetrics,
+) *MetricsHandler {
 	return &MetricsHandler{
 		logger:           log,
 		hcProvider:       hcProvider,
 		globalHCProvider: globalHCProvider,
+		geoProvider:      geoProvider,
+		cleanupProvider:  cleanupProvider,
 	}
+}
+
+// GeoMetrics is the geo section of the system metrics API (1:1 with the
+// GeoIP batch-enrichment snapshot; see feature 03).
+type GeoMetrics struct {
+	QueuePending         int     `json:"queue_pending"`
+	QueuedInMemory       int     `json:"queued_in_memory"`
+	BatchRequestsLastMin int     `json:"batch_requests_last_minute"`
+	BatchRequestsLimit   int     `json:"batch_requests_limit"`
+	UsagePercent1m       float64 `json:"usage_percent_1m"`
+	IPsUpdatedLast10m    int     `json:"ips_updated_last_10m"`
 }
 
 // SystemMetrics represents system resource metrics
@@ -38,6 +59,8 @@ type SystemMetrics struct {
 	Runtime           RuntimeMetrics                        `json:"runtime"`
 	HealthCheck       *checkstats.Snapshot                  `json:"health_check,omitempty"`
 	GlobalHealthCheck *checkstats.GlobalHealthCheckSnapshot `json:"global_health_check,omitempty"`
+	Geo               *GeoMetrics                           `json:"geo,omitempty"`
+	Cleanup           *checkstats.CleanupMetrics            `json:"cleanup,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -74,7 +97,7 @@ type RuntimeMetrics struct {
 // GetSystemMetrics retrieves current system metrics
 //
 //	@Summary		System metrics
-//	@Description	Get current system resource metrics (CPU, memory, disk, runtime)
+//	@Description	Get current system resource metrics (CPU, memory, disk, runtime) plus optional background-pipeline sections (health_check, global_health_check, geo, cleanup)
 //	@Tags			metrics
 //	@Produce		json
 //	@Success		200	{object}	SystemMetrics	"System metrics"
@@ -172,6 +195,12 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 	if h.globalHCProvider != nil {
 		globalHC := h.globalHCProvider()
 		metrics.GlobalHealthCheck = &globalHC
+	}
+	if h.geoProvider != nil {
+		metrics.Geo = h.geoProvider()
+	}
+	if h.cleanupProvider != nil {
+		metrics.Cleanup = h.cleanupProvider()
 	}
 
 	return metrics
