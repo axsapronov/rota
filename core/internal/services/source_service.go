@@ -247,9 +247,12 @@ func (s *SourceService) StartGeoWorker(ctx context.Context) {
 // geoWorkerTick is one pass of the geo enrichment worker.
 func (s *SourceService) geoWorkerTick(ctx context.Context) {
 	// 1. Collect addresses: in-memory queue first, then the DB backlog.
-	addresses := s.geoQueue.Drain(s.geoSvc.BatchSize())
+	// The drain size is provider-aware: the local MaxMind DB is drained
+	// faster (LocalBatchSize) than the external ip-api (BatchSize).
+	drainSize := s.geoSvc.DrainBatchSize()
+	addresses := s.geoQueue.Drain(drainSize)
 	if len(addresses) == 0 {
-		addresses = s.drainGeoBacklog(ctx)
+		addresses = s.drainGeoBacklog(ctx, drainSize)
 	}
 
 	// 2. Refresh the queue-state metrics (in-memory depth + DB backlog).
@@ -312,11 +315,14 @@ func (s *SourceService) geoWorkerTick(ctx context.Context) {
 	)
 }
 
-// drainGeoBacklog pulls up to 100 addresses without geo data from the DB —
+// drainGeoBacklog pulls up to limit addresses without geo data from the DB —
 // the restart-safe fallback when the in-memory queue is empty.
-func (s *SourceService) drainGeoBacklog(ctx context.Context) []string {
+func (s *SourceService) drainGeoBacklog(ctx context.Context, limit int) []string {
+	if limit <= 0 {
+		limit = 100
+	}
 	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
-		`SELECT address FROM proxies WHERE country_code IS NULL AND geo_updated_at IS NULL LIMIT 100`)
+		`SELECT address FROM proxies WHERE country_code IS NULL AND geo_updated_at IS NULL LIMIT $1`, limit)
 	if err != nil {
 		s.logger.Warn("geo backlog drain query failed", "error", err)
 		return nil

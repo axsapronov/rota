@@ -17,6 +17,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/oschwald/geoip2-golang"
 )
 
 // newTestGeoIPService builds a GeoIPService pointed at a fake ip-api with a
@@ -41,6 +42,37 @@ func testGeoIPConfig() config.GeoIPConfig {
 		BatchRequestsPerMinute: 15,
 		BatchSize:              100,
 		MaxRetries:             3,
+		LocalBatchSize:         1000,
+	}
+}
+
+// TestDrainBatchSize verifies the per-tick drain is provider-aware: the
+// external ip-api stays at BatchSize, while the local MaxMind DB (loaded
+// reader) uses the larger LocalBatchSize. A maxmind provider without a
+// loaded reader falls back to BatchSize.
+func TestDrainBatchSize(t *testing.T) {
+	cfg := testGeoIPConfig()
+
+	// ip-api provider -> BatchSize.
+	g := newTestGeoIPService(t, cfg, "http://example.invalid", time.Minute)
+	g.settings = models.GeoIPSettings{Provider: "ip-api"}
+	if got := g.DrainBatchSize(); got != cfg.BatchSize {
+		t.Errorf("ip-api: DrainBatchSize = %d, want %d", got, cfg.BatchSize)
+	}
+
+	// maxmind provider without a loaded reader -> BatchSize (fallback).
+	g2 := newTestGeoIPService(t, cfg, "http://example.invalid", time.Minute)
+	g2.settings = models.GeoIPSettings{Provider: "maxmind"}
+	if got := g2.DrainBatchSize(); got != cfg.BatchSize {
+		t.Errorf("maxmind w/o reader: DrainBatchSize = %d, want %d", got, cfg.BatchSize)
+	}
+
+	// maxmind provider with a loaded reader -> LocalBatchSize.
+	g3 := newTestGeoIPService(t, cfg, "http://example.invalid", time.Minute)
+	g3.settings = models.GeoIPSettings{Provider: "maxmind"}
+	g3.maxmindReader = &geoip2.Reader{} // non-nil satisfies the hasMaxMind check
+	if got := g3.DrainBatchSize(); got != cfg.LocalBatchSize {
+		t.Errorf("maxmind w/ reader: DrainBatchSize = %d, want %d", got, cfg.LocalBatchSize)
 	}
 }
 

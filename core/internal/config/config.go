@@ -64,6 +64,10 @@ type GeoIPConfig struct {
 	// MaxRetries is how many times a retryable batch failure (network error,
 	// 429, 5xx) is retried with exponential backoff + jitter.
 	MaxRetries int // (GEOIP_MAX_RETRIES, default 3, range 0-10)
+	// LocalBatchSize is the number of addresses the geo worker processes per
+	// tick when using the local MaxMind DB. Local lookups are fast and not
+	// subject to the external rate limit, so this is larger than BatchSize.
+	LocalBatchSize int // (GEOIP_LOCAL_BATCH_SIZE, default 1000, range 1-10000)
 }
 
 // DatabaseConfig holds database configuration
@@ -129,6 +133,7 @@ func Load() (*Config, error) {
 			BatchRequestsPerMinute: getEnvAsInt("GEOIP_BATCH_REQUESTS_PER_MINUTE", 15),
 			BatchSize:              getEnvAsInt("GEOIP_BATCH_SIZE", 100),
 			MaxRetries:             getEnvAsInt("GEOIP_MAX_RETRIES", 3),
+			LocalBatchSize:         getEnvAsInt("GEOIP_LOCAL_BATCH_SIZE", 1000),
 		},
 	}
 
@@ -174,6 +179,9 @@ func (c *Config) Validate() error {
 	}
 	if c.GeoIP.MaxRetries < 0 || c.GeoIP.MaxRetries > 10 {
 		return fmt.Errorf("invalid GEOIP_MAX_RETRIES: %d (must be 0-10)", c.GeoIP.MaxRetries)
+	}
+	if c.GeoIP.LocalBatchSize < 1 || c.GeoIP.LocalBatchSize > 10000 {
+		return fmt.Errorf("invalid GEOIP_LOCAL_BATCH_SIZE: %d (must be 1-10000; per-tick drain for the local MaxMind DB)", c.GeoIP.LocalBatchSize)
 	}
 
 	return nil

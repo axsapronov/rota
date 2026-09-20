@@ -703,6 +703,26 @@ func (g *GeoIPService) BatchSize() int {
 	return g.cfg.BatchSize
 }
 
+// DrainBatchSize returns the number of addresses the geo worker should
+// process per tick. For the ip-api provider it stays at BatchSize (aligned
+// with the external API); for the maxmind provider with a loaded reader it
+// uses the larger LocalBatchSize, since local lookups are fast and not
+// subject to the external rate limit.
+func (g *GeoIPService) DrainBatchSize() int {
+	g.mu.RLock()
+	provider := g.settings.Provider
+	hasMaxMind := g.maxmindReader != nil
+	g.mu.RUnlock()
+
+	if provider == "maxmind" && hasMaxMind {
+		if g.cfg.LocalBatchSize > 0 {
+			return g.cfg.LocalBatchSize
+		}
+		return 1000
+	}
+	return g.BatchSize()
+}
+
 // SetQueueState caches the in-memory queue depth and DB backlog for the
 // metrics snapshot.
 func (g *GeoIPService) SetQueueState(queuePending, queuedInMemory int) {
