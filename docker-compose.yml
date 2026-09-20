@@ -28,11 +28,6 @@ services:
       dockerfile: Dockerfile
     container_name: rota-core
     restart: unless-stopped
-    volumes:
-      # GeoLite2 .mmdb databases (downloaded from P3TERX/GeoLite.mmdb, no
-      # license key needed). Read from data/GeoLite2-City.mmdb when the GeoIP
-      # provider is set to maxmind.
-      - ./data:/app/data:ro
     ports:
       # The proxy itself is the product — keep it reachable on the host.
       # The REST API (8001) is internal only; reach it via Caddy at /api.
