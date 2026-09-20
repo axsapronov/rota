@@ -370,3 +370,37 @@ func TestEnrichBatchReservedNotSent(t *testing.T) {
 		t.Fatalf("queries sent = %v, want [8.8.8.8] only", gotQueries)
 	}
 }
+
+// TestGeoDownloadURLs verifies the download URL priority: license-based first
+// (with the mirror as fallback) when a license key is set, otherwise the
+// custom URL, otherwise the default mirror.
+func TestGeoDownloadURLs(t *testing.T) {
+	licenseURL := "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=abc&suffix=tar.gz"
+	customURL := "https://example.com/custom.mmdb"
+
+	tests := []struct {
+		name       string
+		licenseKey string
+		customURL  string
+		want       []string
+	}{
+		{"license only, default mirror fallback", "abc", "", []string{licenseURL, geoMirrorURL}},
+		{"license with custom mirror", "abc", customURL, []string{licenseURL, customURL}},
+		{"no license, custom url", "", customURL, []string{customURL}},
+		{"no license, default mirror", "", "", []string{geoMirrorURL}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := geoDownloadURLs(tt.licenseKey, tt.customURL)
+			if len(got) != len(tt.want) {
+				t.Fatalf("geoDownloadURLs = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("url[%d] = %s, want %s", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

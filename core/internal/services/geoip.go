@@ -28,6 +28,10 @@ import (
 
 const geoBatchURL = "http://ip-api.com/batch"
 
+// geoMirrorURL is the fallback mirror (updated daily on GitHub) used when
+// the license-based MaxMind download fails.
+const geoMirrorURL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+
 const geoBatchFields = "status,message,country,countryCode,regionName,city,isp,lat,lon,query"
 
 // ipAPIResponse is the response from ip-api.com batch endpoint
@@ -233,7 +237,77 @@ func (g *GeoIPService) StartAutoUpdate(ctx context.Context) {
 	}()
 }
 
+// geoDownloadURLs returns the ordered download URLs to try. A license-based
+// MaxMind download has priority when a license key is configured; the mirror
+// (custom URL if set, P3TERX by default) is the fallback.
+func geoDownloadURLs(licenseKey, customURL string) []string {
+	if licenseKey != "" {
+		urls := []string{fmt.Sprintf("https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=%s&suffix=tar.gz", licenseKey)}
+		if customURL != "" {
+			urls = append(urls, customURL)
+		} else {
+			urls = append(urls, geoMirrorURL)
+		}
+		return urls
+	}
+	if customURL != "" {
+		return []string{customURL}
+	}
+	return []string{geoMirrorURL}
+}
+
+// downloadAndInstallDB downloads the MaxMind DB from one URL, validates it,
+// and atomically replaces the local file.
+func (g *GeoIPService) downloadAndInstallDB(ctx context.Context, downloadURL, dbPath string) (*geoip2.Reader, error) {
+	g.logger.Info("downloading maxmind geoip db...", "url", downloadURL, "timeout", "5m")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download request: %w", err)
+	}
+
+	resp, err := g.downloadClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download maxmind db: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("maxmind download returned HTTP %d", resp.StatusCode)
+	}
+
+	mmdbBytes, err := extractMMDBData(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract mmdb database: %w", err)
+	}
+
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	tmpFile := dbPath + ".tmp"
+	if err := os.WriteFile(tmpFile, mmdbBytes, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write temp db file: %w", err)
+	}
+
+	newReader, err := geoip2.Open(tmpFile)
+	if err != nil {
+		_ = os.Remove(tmpFile)
+		return nil, fmt.Errorf("downloaded maxmind database is invalid: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, dbPath); err != nil {
+		_ = newReader.Close()
+		_ = os.Remove(tmpFile)
+		return nil, fmt.Errorf("failed to replace maxmind db file: %w", err)
+	}
+
+	return newReader, nil
+}
+
 // DownloadAndUpdateDB downloads MaxMind GeoIP DB archive and updates local reader.
+// With a license key it tries the license-based download first and falls back
+// to the mirror on any failure (network error, non-200, invalid archive).
 func (g *GeoIPService) DownloadAndUpdateDB(ctx context.Context) error {
 	g.mu.RLock()
 	licenseKey := g.settings.MaxMindLicenseKey
@@ -245,89 +319,52 @@ func (g *GeoIPService) DownloadAndUpdateDB(ctx context.Context) error {
 		dbPath = "data/GeoLite2-City.mmdb"
 	}
 
-	downloadURL := customURL
-	if downloadURL == "" {
-		if licenseKey != "" {
-			downloadURL = fmt.Sprintf("https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=%s&suffix=tar.gz", licenseKey)
-		} else {
-			// Default to P3TERX GeoLite2-City mirror (updated daily on GitHub)
-			downloadURL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
-		}
-	}
+	urls := geoDownloadURLs(licenseKey, customURL)
 
 	// Use a dedicated 5-minute timeout for database downloads (files can be 60-100MB+)
 	dlCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	g.logger.Info("downloading maxmind geoip db...", "url", downloadURL, "timeout", "5m")
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create download request: %w", err)
-	}
-
-	resp, err := g.downloadClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download maxmind db: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("maxmind download returned HTTP %d", resp.StatusCode)
-	}
-
-	mmdbBytes, err := extractMMDBData(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to extract mmdb database: %w", err)
-	}
-
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", dir, err)
-	}
-
-	tmpFile := dbPath + ".tmp"
-	if err := os.WriteFile(tmpFile, mmdbBytes, 0644); err != nil {
-		return fmt.Errorf("failed to write temp db file: %w", err)
-	}
-
-	newReader, err := geoip2.Open(tmpFile)
-	if err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("downloaded maxmind database is invalid: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, dbPath); err != nil {
-		_ = newReader.Close()
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to replace maxmind db file: %w", err)
-	}
-
-	g.mu.Lock()
-	if g.maxmindReader != nil {
-		_ = g.maxmindReader.Close()
-	}
-	g.maxmindReader = newReader
-	now := time.Now()
-	g.settings.LastUpdatedAt = now
-	g.mu.Unlock()
-
-	if g.settingsRepo != nil {
-		if s, err := g.settingsRepo.GetAll(ctx); err == nil && s != nil {
-			s.GeoIP.LastUpdatedAt = now
-			_ = g.settingsRepo.Set(ctx, "geoip", map[string]any{
-				"provider":              s.GeoIP.Provider,
-				"maxmind_license_key":   s.GeoIP.MaxMindLicenseKey,
-				"maxmind_db_path":       s.GeoIP.MaxMindDBPath,
-				"maxmind_url":           s.GeoIP.MaxMindURL,
-				"auto_update":           s.GeoIP.AutoUpdate,
-				"update_interval_hours": s.GeoIP.UpdateIntervalHours,
-				"last_updated_at":       now.Format(time.RFC3339),
-			})
+	var lastErr error
+	for i, downloadURL := range urls {
+		if i > 0 {
+			g.logger.Warn("maxmind geoip db download failed, falling back to mirror", "url", downloadURL, "error", lastErr)
 		}
+		newReader, err := g.downloadAndInstallDB(dlCtx, downloadURL, dbPath)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		g.mu.Lock()
+		if g.maxmindReader != nil {
+			_ = g.maxmindReader.Close()
+		}
+		g.maxmindReader = newReader
+		now := time.Now()
+		g.settings.LastUpdatedAt = now
+		g.mu.Unlock()
+
+		if g.settingsRepo != nil {
+			if s, err := g.settingsRepo.GetAll(ctx); err == nil && s != nil {
+				s.GeoIP.LastUpdatedAt = now
+				_ = g.settingsRepo.Set(ctx, "geoip", map[string]any{
+					"provider":              s.GeoIP.Provider,
+					"maxmind_license_key":   s.GeoIP.MaxMindLicenseKey,
+					"maxmind_db_path":       s.GeoIP.MaxMindDBPath,
+					"maxmind_url":           s.GeoIP.MaxMindURL,
+					"auto_update":           s.GeoIP.AutoUpdate,
+					"update_interval_hours": s.GeoIP.UpdateIntervalHours,
+					"last_updated_at":       now.Format(time.RFC3339),
+				})
+			}
+		}
+
+		g.logger.Info("successfully updated maxmind geoip db", "path", dbPath, "url", downloadURL, "updated_at", now)
+		return nil
 	}
 
-	g.logger.Info("successfully updated maxmind geoip db", "path", dbPath, "updated_at", now)
-	return nil
+	return fmt.Errorf("all maxmind db download sources failed: %w", lastErr)
 }
 
 // extractMMDBData reads response stream and returns raw .mmdb file content
