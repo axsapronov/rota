@@ -20,11 +20,15 @@ const (
 
 // explicitReservedNetworks are reserved ranges that netip's IsPrivate and
 // friends do not cover: 0.0.0.0/8 ("this network"), 192.0.0.0/16 (IETF
-// protocol assignments), and 100.64.0.0/10 (carrier-grade NAT).
+// protocol assignments), 100.64.0.0/10 (carrier-grade NAT), and
+// 240.0.0.0/4 (reserved for future use — ip-api rejects it as "reserved
+// range", so without this entry such proxies loop the external batch API
+// forever).
 var explicitReservedNetworks = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("192.0.0.0/16"),
 	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
 // NormalizeProxyAddress reduces a raw proxy line to "host:port". It strips

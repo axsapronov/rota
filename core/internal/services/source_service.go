@@ -263,12 +263,17 @@ func (s *SourceService) geoWorkerTick(ctx context.Context) {
 		return
 	}
 
-	// 3. Normalize and dedupe by IP (ip -> address).
+	// 3. Normalize and dedupe by IP (ip -> address). Addresses that cannot
+	// be looked up (unparseable, reserved) are marked processed so they stop
+	// matching the DB backlog query — otherwise they are re-drained every
+	// tick forever.
 	ipToAddr := make(map[string]string, len(addresses))
 	var ips []netip.Addr
+	var skipped []string
 	for _, addr := range addresses {
 		ip, reason := ExtractPublicIP(addr)
 		if reason != "" {
+			skipped = append(skipped, addr)
 			continue
 		}
 		key := ip.String()
@@ -276,6 +281,9 @@ func (s *SourceService) geoWorkerTick(ctx context.Context) {
 			ipToAddr[key] = addr
 			ips = append(ips, ip)
 		}
+	}
+	if len(skipped) > 0 {
+		s.markGeoSkipped(ctx, skipped)
 	}
 	if len(ips) == 0 {
 		return
@@ -555,6 +563,19 @@ func (s *SourceService) updateGeo(ctx context.Context, geos map[string]models.Ge
 		}
 	}
 	return updated
+}
+
+// markGeoSkipped stamps addresses that can never be enriched (unparseable or
+// reserved IPs) with geo_updated_at so they leave the DB backlog.
+func (s *SourceService) markGeoSkipped(ctx context.Context, addresses []string) {
+	for _, addr := range addresses {
+		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx,
+			`UPDATE proxies SET geo_updated_at = NOW()
+			 WHERE address = $1 AND geo_updated_at IS NULL`, addr,
+		); err != nil {
+			s.logger.Warn("failed to mark geo-skipped proxy", "address", addr, "error", err)
+		}
+	}
 }
 
 // EnrichAll queues geo enrichment for all proxies that have no geo data yet
