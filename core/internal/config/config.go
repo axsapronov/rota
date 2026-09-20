@@ -21,8 +21,10 @@ type Config struct {
 	// random password was generated. The server logs it once on first-boot seed.
 	AdminPassGenerated bool
 
-	// JWTSecret, when set, signs dashboard tokens instead of the key persisted
-	// in the database — for operators who want to control rotation themselves.
+	// JWTSecret is the JWT signing secret. When set (JWT_SECRET env), it takes
+	// precedence over the auto-generated secret persisted in the database.
+	// When empty, the server uses the persisted secret (or generates and
+	// persists one on first boot), so sessions survive restarts.
 	JWTSecret string
 
 	// CORSAllowedOrigins controls the Access-Control-Allow-Origin values.
@@ -118,7 +120,7 @@ func Load() (*Config, error) {
 		AdminUser:          getEnv("ROTA_ADMIN_USER", "admin"),
 		AdminPass:          adminPass,
 		AdminPassGenerated: adminPassGenerated,
-		JWTSecret:          os.Getenv("JWT_SECRET"),
+		JWTSecret:          getEnv("JWT_SECRET", ""),
 		CORSAllowedOrigins: splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
 		TrustProxyHeaders: getEnvAsBool("TRUST_PROXY_HEADERS", false),

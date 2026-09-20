@@ -570,6 +570,35 @@ var migrations = []Migration{
 			DELETE FROM settings WHERE key = 'global_health_check';
 		`,
 	},
+	{
+		Version:     27,
+		Description: "Add orphan/idle TTL settings to healthcheck (6h/24h defaults, 0 disables the filter)",
+		Up: `
+			UPDATE settings
+			SET value = jsonb_set(
+				jsonb_set(value, '{orphan_ttl_minutes}', '360', true),
+				'{idle_ttl_minutes}', '1440', true
+			)
+			WHERE key = 'healthcheck';
+		`,
+		Down: `
+			UPDATE settings
+			SET value = value - 'orphan_ttl_minutes' - 'idle_ttl_minutes'
+			WHERE key = 'healthcheck';
+		`,
+	},
+	{
+		Version:     28,
+		Description: "Partial index on proxies(last_check) for TTL-filtered orphan/idle health-check sweeps",
+		Up: `
+			CREATE INDEX IF NOT EXISTS idx_proxies_last_check
+				ON proxies (last_check)
+				WHERE status <> 'dead';
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_proxies_last_check;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations
