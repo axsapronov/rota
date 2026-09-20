@@ -150,6 +150,7 @@ function ProxiesPage() {
   // Synchronous "cleanup now" button state
   const [cleanupRunning, setCleanupRunning] = React.useState(false)
 
+
   const fetchProxies = React.useCallback(async () => {
     const seq = ++fetchSeq.current
     try {
