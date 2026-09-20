@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/checkstats"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
@@ -114,6 +115,7 @@ func (s *LogCleanupService) worker(ctx context.Context, tickC <-chan time.Time) 
 // runCleanup performs the actual cleanup
 func (s *LogCleanupService) runCleanup(ctx context.Context) error {
 	s.logger.Info("running log cleanup")
+	startedAt := time.Now()
 
 	// Get current settings
 	settings, err := s.settingsRepo.GetAll(ctx)
@@ -127,14 +129,17 @@ func (s *LogCleanupService) runCleanup(ctx context.Context) error {
 	}
 
 	// Update retention policy
+	lastError := ""
 	if err := s.updateRetentionPolicy(ctx, settings.LogRetention); err != nil {
 		s.logger.Error("failed to update retention policy", "error", err)
+		lastError = err.Error()
 		// Don't return error, continue with other tasks
 	}
 
 	// Update compression policy
 	if err := s.updateCompressionPolicy(ctx, settings.LogRetention); err != nil {
 		s.logger.Error("failed to update compression policy", "error", err)
+		lastError = err.Error()
 		// Don't return error, continue with other tasks
 	}
 
@@ -151,6 +156,24 @@ func (s *LogCleanupService) runCleanup(ctx context.Context) error {
 		s.logger.Info("updated cleanup interval", "hours", settings.LogRetention.CleanupIntervalHours)
 	}
 	s.mu.Unlock()
+
+	// Record the run for the cleanup metrics snapshot.
+	now := time.Now()
+	nextRun := now.Add(newInterval)
+	status := checkstats.CleanupStatusOK
+	if lastError != "" {
+		status = checkstats.CleanupStatusError
+	}
+	checkstats.RecordLogCleanup(checkstats.LogCleanupSnapshot{
+		Enabled:              true,
+		LastRunAt:            &now,
+		LastStatus:           status,
+		LastDurationMs:       now.Sub(startedAt).Milliseconds(),
+		NextRunAt:            &nextRun,
+		RetentionDays:        settings.LogRetention.RetentionDays,
+		CompressionAfterDays: settings.LogRetention.CompressionAfterDays,
+		LastError:            lastError,
+	})
 
 	s.logger.Info("log cleanup completed",
 		"retention_days", settings.LogRetention.RetentionDays,

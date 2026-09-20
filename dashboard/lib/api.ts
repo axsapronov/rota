@@ -28,6 +28,7 @@ import {
   UpdateProxyUserRequest,
   PoolAlertRule,
   CreatePoolAlertRuleRequest,
+  ForceCleanupStartResponse,
 } from "./types"
 
 // Empty by default → same-origin: the browser calls /api and /ws on whatever
@@ -261,6 +262,16 @@ class ApiClient {
     return this.request("/api/v1/proxies/reload", {
       method: "POST",
     })
+  }
+
+  async startForceCleanup(): Promise<ForceCleanupStartResponse> {
+    return this.request<ForceCleanupStartResponse>("/api/v1/proxies/cleanup/force", {
+      method: "POST",
+    })
+  }
+
+  async getProxyTestJob(jobId: string): Promise<HCJob> {
+    return this.request<HCJob>(`/api/v1/proxies/test/${jobId}`)
   }
 
   // Logs

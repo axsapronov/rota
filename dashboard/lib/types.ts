@@ -360,6 +360,13 @@ export interface HCJob {
   results?: ProxyTestResult[]
 }
 
+export interface ForceCleanupStartResponse {
+  job_id: string | null
+  status: string
+  total: number
+  already_running: boolean
+}
+
 // ── Proxy Users ────────────────────────────────────────────────────────────
 export interface ProxyUser {
   id: number

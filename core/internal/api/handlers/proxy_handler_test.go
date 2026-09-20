@@ -14,6 +14,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -121,7 +122,7 @@ func TestProxyHandlerTestManualImmediate(t *testing.T) {
 	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: pool})
 	tracker := proxy.NewUsageTracker(repo)
 	healthChecker := proxy.NewHealthChecker(repo, settingsRepo, tracker, logger.New("error"))
-	handler := NewProxyHandler(repo, healthChecker, logger.New("error"))
+	handler := NewProxyHandler(repo, healthChecker, services.NewForceCleanupService(repo, logger.New("error")), logger.New("error"))
 
 	var id int
 	err := pool.QueryRow(ctx,

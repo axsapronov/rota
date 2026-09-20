@@ -37,7 +37,7 @@ import { UsageBar } from "@/components/usage-bar"
 import { TagInput } from "@/components/tag-input"
 import { useUrlState } from "@/hooks/use-url-state"
 import { api } from "@/lib/api"
-import { Proxy } from "@/lib/types"
+import { HCJob, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
 import { count, ms, percent, relative, formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -132,6 +132,13 @@ function ProxiesPage() {
   // Monotonic request counter: only the latest request's result is applied,
   // so a stale response can't push the page indicator back.
   const fetchSeq = React.useRef(0)
+
+  // Force cleanup of failed proxies
+  const [forceCleanupDialogOpen, setForceCleanupDialogOpen] = React.useState(false)
+  const [forceCleaning, setForceCleaning] = React.useState(false)
+  const [forceCleanupJob, setForceCleanupJob] = React.useState<HCJob | null>(null)
+  const [failedCount, setFailedCount] = React.useState<number | null>(null)
+  const forceCleanupPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchProxies = React.useCallback(async () => {
     const seq = ++fetchSeq.current
@@ -430,7 +437,71 @@ function ProxiesPage() {
 
   const hasFilters = !!(url.q || url.status || url.protocol)
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  const stopForceCleanupPoll = React.useCallback(() => {
+    if (forceCleanupPollRef.current) {
+      clearInterval(forceCleanupPollRef.current)
+      forceCleanupPollRef.current = null
+    }
+  }, [])
+
+  // Cleanup on unmount
+  React.useEffect(() => () => stopForceCleanupPoll(), [stopForceCleanupPoll])
+
+  const handleForceCleanup = async () => {
+    try {
+      const res = await api.getProxies({ status: "failed", page: 1, limit: 1 })
+      if (res.pagination.total === 0) {
+        toast.success("Nothing to clean", "No failed proxies found")
+        return
+      }
+      setFailedCount(res.pagination.total)
+      setForceCleanupDialogOpen(true)
+    } catch (error) {
+      console.error("Failed to count failed proxies:", error)
+      toast.error("Failed to count failed proxies", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const confirmForceCleanup = async () => {
+    setForceCleanupDialogOpen(false)
+    setForceCleaning(true)
+    setForceCleanupJob(null)
+    stopForceCleanupPoll()
+    try {
+      const res = await api.startForceCleanup()
+      if (res.job_id === null) {
+        // Race: the proxies recovered between the count and the start.
+        toast.success("Nothing to clean", "No failed proxies found")
+        setForceCleaning(false)
+        return
+      }
+      // already_running: poll the existing job; new job: poll the new one.
+      forceCleanupPollRef.current = setInterval(async () => {
+        try {
+          const job = await api.getProxyTestJob(res.job_id!)
+          setForceCleanupJob(job)
+          if (job.status === "done") {
+            stopForceCleanupPoll()
+            setForceCleaning(false)
+            setForceCleanupJob(null)
+            toast.success(`Removed ${job.progress} failed proxies`)
+            fetchProxies()
+          } else if (job.status === "failed") {
+            stopForceCleanupPoll()
+            setForceCleaning(false)
+            toast.error(job.error || "Force cleanup failed")
+          }
+        } catch {
+          stopForceCleanupPoll()
+          setForceCleaning(false)
+        }
+      }, 1500)
+    } catch (error) {
+      console.error("Failed to start force cleanup:", error)
+      toast.error("Failed to start force cleanup", error instanceof Error ? error.message : "Unknown error")
+      setForceCleaning(false)
+    }
+  }
 
   return (
     <>
@@ -440,6 +511,9 @@ function ProxiesPage() {
       >
         <Button variant="outline" onClick={handleReloadProxies} disabled={isReloading}>
           {isReloading ? "Reloading…" : "Reload rotation pool"}
+        </Button>
+        <Button variant="outline" onClick={handleForceCleanup} disabled={isReloading || forceCleaning}>
+          {forceCleaning ? "Force cleaning…" : "Force cleanup"}
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -512,6 +586,15 @@ function ProxiesPage() {
           </div>
         )}
       </div>
+
+      {forceCleaning && forceCleanupJob && (
+        <div className="border-border flex items-center gap-3 border-b px-4 py-2 md:px-6">
+          <span className="text-muted-foreground text-xs">
+            Force cleaning up failed proxies — {count(forceCleanupJob.progress)} / {count(forceCleanupJob.total)}
+          </span>
+          <UsageBar value={forceCleanupJob.total > 0 ? (forceCleanupJob.progress / forceCleanupJob.total) * 100 : 0} className="w-40" />
+        </div>
+      )}
 
       <Content>
         {isLoading && data.length === 0 ? (
@@ -881,6 +964,29 @@ function ProxiesPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={confirmDeleteAll}>Delete all</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Force Cleanup Confirmation Dialog */}
+      <AlertDialog
+        open={forceCleanupDialogOpen}
+        onOpenChange={(open) => {
+          setForceCleanupDialogOpen(open)
+          if (!open) setFailedCount(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clean up {failedCount ?? 0} failed proxies?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete all proxies currently marked as failed,
+              including those in pools. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmForceCleanup}>Force cleanup</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -309,6 +309,39 @@ func (r *ProxyRepository) DeleteDeadProxies(ctx context.Context, maxFailedDays i
 	return int(total), nil
 }
 
+// CountFailedProxies returns the number of proxies with status = 'failed'.
+func (r *ProxyRepository) CountFailedProxies(ctx context.Context) (int, error) {
+	var count int
+	if err := r.db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM proxies WHERE status = 'failed'`,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count failed proxies: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteFailedProxiesBatch deletes up to batchSize failed proxies in one
+// transaction. Returns the number actually deleted (0 = nothing left).
+// FOR UPDATE SKIP LOCKED keeps concurrent health checks from blocking on the
+// batch (and vice versa): locked rows are skipped, not waited for.
+func (r *ProxyRepository) DeleteFailedProxiesBatch(ctx context.Context, batchSize int) (int, error) {
+	tag, err := r.db.Pool.Exec(ctx, `
+		WITH batch AS (
+			SELECT id FROM proxies
+			WHERE status = 'failed'
+			ORDER BY id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		DELETE FROM proxies
+		WHERE id IN (SELECT id FROM batch)
+	`, batchSize)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete failed proxies batch: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // Update updates a proxy
 func (r *ProxyRepository) Update(ctx context.Context, id int, req models.UpdateProxyRequest) (*models.Proxy, error) {
 	tags := req.Tags

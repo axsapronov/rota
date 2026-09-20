@@ -328,6 +328,27 @@ func (s *HCJobStore) ListByKind(kind HCJobKind) []*HCJob {
 	return out
 }
 
+// FindActiveByKind returns the most recent pending/running job of the given
+// kind, for in-flight guards (e.g. rejecting a second force cleanup while one
+// is already queued/running).
+func (s *HCJobStore) FindActiveByKind(kind HCJobKind) (*HCJob, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *HCJob
+	for _, j := range s.jobs {
+		if j.Kind != kind {
+			continue
+		}
+		if j.Status != HCJobPending && j.Status != HCJobRunning {
+			continue
+		}
+		if best == nil || j.StartedAt.After(best.StartedAt) {
+			best = j
+		}
+	}
+	return best, best != nil
+}
+
 // consume pulls job ids off the queue and runs them. A panic in the consumer
 // itself is recovered (logged) so the runConsumerLoop restart path takes over.
 func (s *HCJobStore) consume(ctx context.Context) {
