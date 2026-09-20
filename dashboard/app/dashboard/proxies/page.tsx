@@ -26,6 +26,10 @@ import {
   Filter,
   Tag,
   BrushCleaning,
+  Globe,
+  Coffee,
+  RotateCw,
+  Zap,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -72,7 +76,7 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api } from "@/lib/api"
-import { HCJob, Proxy } from "@/lib/types"
+import { GeoSummaryItem, HCJob, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
 import { TagInput } from "@/components/tag-input"
 
@@ -85,7 +89,9 @@ export default function ProxiesPage() {
   const [editingProxy, setEditingProxy] = React.useState<Proxy | null>(null)
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
+  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({
+    country_code: false,
+  })
   const [rowSelection, setRowSelection] = React.useState({})
   const [pagination, setPagination] = React.useState({
     page: 1,
@@ -97,6 +103,10 @@ export default function ProxiesPage() {
   const [debouncedSearchQuery, setDebouncedSearchQuery] = React.useState("")
   const [statusFilter, setStatusFilter] = React.useState<string>("all")
   const [protocolFilter, setProtocolFilter] = React.useState<string>("all")
+  const [countryFilter, setCountryFilter] = React.useState<string>("all")
+  // Country filter options (best-effort; hidden when the summary fails to load)
+  const [geoCountries, setGeoCountries] = React.useState<GeoSummaryItem[]>([])
+  const [geoCountriesLoaded, setGeoCountriesLoaded] = React.useState(false)
 
   const [newProxy, setNewProxy] = React.useState({
     address: "",
@@ -130,12 +140,18 @@ export default function ProxiesPage() {
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
    const [deleteAllConfirm, setDeleteAllConfirm] = React.useState(false)
 
-  // Force cleanup of failed proxies
+  // Unified async job state: bulk test, global/idle health check, force
+  // cleanup. One job at a time; while one runs, all actions are disabled.
+  const [jobRunning, setJobRunning] = React.useState(false)
+  const [activeJob, setActiveJob] = React.useState<HCJob | null>(null)
+  const hcPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Force cleanup of failed proxies (confirm dialog)
   const [forceCleanupDialogOpen, setForceCleanupDialogOpen] = React.useState(false)
-  const [forceCleaning, setForceCleaning] = React.useState(false)
-  const [forceCleanupJob, setForceCleanupJob] = React.useState<HCJob | null>(null)
   const [failedCount, setFailedCount] = React.useState<number | null>(null)
-  const forceCleanupPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Synchronous "cleanup now" button state
+  const [cleanupRunning, setCleanupRunning] = React.useState(false)
 
   // Debounce search query
   React.useEffect(() => {
@@ -161,6 +177,7 @@ export default function ProxiesPage() {
         search: debouncedSearchQuery || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         protocol: protocolFilter === "all" ? undefined : protocolFilter,
+        country_code: countryFilter === "all" ? undefined : countryFilter,
         sort: sortField,
         order: sortOrder as "asc" | "desc" | undefined,
       })
@@ -171,7 +188,7 @@ export default function ProxiesPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, sorting])
+  }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, countryFilter, sorting])
 
   React.useEffect(() => {
     fetchProxies()
@@ -188,6 +205,20 @@ export default function ProxiesPage() {
   React.useEffect(() => {
     fetchTagList()
   }, [fetchTagList])
+
+  // Country filter options from the geo summary (best-effort, like tag
+  // suggestions: if this fails, the country filter is simply not shown).
+  React.useEffect(() => {
+    api
+      .getGeoByCountry()
+      .then((res) => {
+        setGeoCountries([...res.geo].sort((a, b) => b.total - a.total))
+      })
+      .catch(() => {
+        // Leave the list empty; the filter stays hidden.
+      })
+      .finally(() => setGeoCountriesLoaded(true))
+  }, [])
 
   const handleAddProxy = async () => {
     try {
@@ -493,15 +524,107 @@ export default function ProxiesPage() {
     }
   }
 
-  const stopForceCleanupPoll = React.useCallback(() => {
-    if (forceCleanupPollRef.current) {
-      clearInterval(forceCleanupPollRef.current)
-      forceCleanupPollRef.current = null
+  const stopHcPoll = React.useCallback(() => {
+    if (hcPollRef.current) {
+      clearInterval(hcPollRef.current)
+      hcPollRef.current = null
     }
   }, [])
 
   // Cleanup on unmount
-  React.useEffect(() => () => stopForceCleanupPoll(), [stopForceCleanupPoll])
+  React.useEffect(() => () => stopHcPoll(), [stopHcPoll])
+
+  // Poll a proxy test job until it reaches a terminal status.
+  const startJobPolling = React.useCallback((jobId: string) => {
+    stopHcPoll()
+    hcPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.getProxyTestJob(jobId)
+        setActiveJob(job)
+        if (job.status === "done") {
+          stopHcPoll()
+          setJobRunning(false)
+          setActiveJob(null)
+          if (job.kind === "force_cleanup") {
+            toast.success(`Removed ${job.progress} failed proxies`)
+          } else {
+            toast.success("Health check finished", `${job.active} active, ${job.failed} failed`)
+          }
+          fetchProxies()
+        } else if (job.status === "failed") {
+          stopHcPoll()
+          setJobRunning(false)
+          setActiveJob(null)
+          toast.error(job.error || "Job failed")
+        }
+      } catch {
+        stopHcPoll()
+        setJobRunning(false)
+        setActiveJob(null)
+      }
+    }, 2000)
+  }, [stopHcPoll, fetchProxies])
+
+  const handleGlobalHealthCheck = async () => {
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startGlobalHealthCheck()
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start global health check:", error)
+      setJobRunning(false)
+      toast.error("Failed to start global health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleIdleHealthCheck = async () => {
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startIdleOrphanHealthCheck()
+      if (res.total === 0) {
+        setJobRunning(false)
+        toast.success("Nothing to check", "No idle orphan proxies found")
+        return
+      }
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start idle health check:", error)
+      setJobRunning(false)
+      toast.error("Failed to start idle health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleBulkTest = async () => {
+    const selectedIds = getSelectedProxyIds()
+    if (selectedIds.length === 0) return
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startProxyHealthCheck(selectedIds, 20)
+      toast.success(`Health check started (${selectedIds.length} proxies)`)
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start bulk proxy test:", error)
+      setJobRunning(false)
+      toast.error("Failed to start bulk test", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleCleanupNow = async () => {
+    setCleanupRunning(true)
+    try {
+      const res = await api.runProxyCleanupNow()
+      toast.success("Cleanup finished", `${res.deleted} proxies removed`)
+      fetchProxies()
+    } catch (error) {
+      console.error("Failed to run proxy cleanup:", error)
+      toast.error("Failed to run cleanup", error instanceof Error ? error.message : "Unknown error")
+    } finally {
+      setCleanupRunning(false)
+    }
+  }
 
   const handleForceCleanup = async () => {
     try {
@@ -520,42 +643,23 @@ export default function ProxiesPage() {
 
   const confirmForceCleanup = async () => {
     setForceCleanupDialogOpen(false)
-    setForceCleaning(true)
-    setForceCleanupJob(null)
-    stopForceCleanupPoll()
+    setJobRunning(true)
+    setActiveJob(null)
+    stopHcPoll()
     try {
       const res = await api.startForceCleanup()
       if (res.job_id === null) {
         // Race: the proxies recovered between the count and the start.
         toast.success("Nothing to clean", "No failed proxies found")
-        setForceCleaning(false)
+        setJobRunning(false)
         return
       }
       // already_running: poll the existing job; new job: poll the new one.
-      forceCleanupPollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getProxyTestJob(res.job_id!)
-          setForceCleanupJob(job)
-          if (job.status === "done") {
-            stopForceCleanupPoll()
-            setForceCleaning(false)
-            setForceCleanupJob(null)
-            toast.success(`Removed ${job.progress} failed proxies`)
-            fetchProxies()
-          } else if (job.status === "failed") {
-            stopForceCleanupPoll()
-            setForceCleaning(false)
-            toast.error(job.error || "Force cleanup failed")
-          }
-        } catch {
-          stopForceCleanupPoll()
-          setForceCleaning(false)
-        }
-      }, 1500)
+      startJobPolling(res.job_id)
     } catch (error) {
       console.error("Failed to start force cleanup:", error)
       toast.error("Failed to start force cleanup", error instanceof Error ? error.message : "Unknown error")
-      setForceCleaning(false)
+      setJobRunning(false)
     }
   }
 
@@ -596,6 +700,34 @@ export default function ProxiesPage() {
         )
       },
       cell: ({ row }) => <div className="font-mono">{row.getValue("address")}</div>,
+    },
+    {
+      accessorKey: "country_code",
+      header: "Country",
+      enableSorting: false,
+      cell: ({ row }) => {
+        const proxy = row.original
+        if (!proxy.country_code) {
+          return <span className="text-muted-foreground">—</span>
+        }
+        const tooltip = [proxy.country_name, proxy.region_name, proxy.city_name, proxy.isp]
+          .filter(Boolean)
+          .join(", ")
+        return (
+          <span className="flex items-center gap-1.5" title={tooltip || undefined}>
+            <img
+              src={`https://flagcdn.com/${proxy.country_code.toLowerCase()}.svg`}
+              alt=""
+              className="h-3 w-4 rounded-sm"
+              // CDN is not a hard dependency: on load failure just keep the code.
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = "none"
+              }}
+            />
+            {proxy.country_code}
+          </span>
+        )
+      },
     },
     {
       accessorKey: "protocol",
@@ -699,7 +831,17 @@ export default function ProxiesPage() {
     },
     {
       accessorKey: "avg_response_time",
-      header: "Avg Response",
+      header: ({ column }) => {
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Avg Response
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        )
+      },
       cell: ({ row }) => {
         const value = parseFloat(row.getValue("avg_response_time"))
         return <div>{value}ms</div>
@@ -707,7 +849,17 @@ export default function ProxiesPage() {
     },
     {
       accessorKey: "last_check",
-      header: "Last Check",
+      header: ({ column }) => {
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Last Check
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        )
+      },
       cell: ({ row }) => {
         const raw = row.getValue("last_check") as string | null | undefined
         if (!raw || raw === "idle") {
@@ -767,11 +919,16 @@ export default function ProxiesPage() {
   const table = useReactTable({
     data,
     columns,
-    onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
+    onSortingChange: (updater) => {
+      setSorting(updater)
+      // Manual sorting: reset to the first page so we don't land on a page
+      // that no longer exists under the new order.
+      setPagination(prev => ({ ...prev, page: 1 }))
+    },
     manualPagination: true,
     manualSorting: true,
     manualFiltering: true,
@@ -820,17 +977,45 @@ export default function ProxiesPage() {
               <Button
                 variant="outline"
                 onClick={handleReloadProxies}
-                disabled={isReloading}
+                disabled={isReloading || jobRunning || cleanupRunning}
               >
                 <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
                 Reload Pool
               </Button>
               <Button
                 variant="outline"
-                onClick={handleForceCleanup}
-                disabled={isReloading || forceCleaning}
+                onClick={handleGlobalHealthCheck}
+                disabled={isReloading || jobRunning || cleanupRunning}
               >
-                {forceCleaning ? (
+                <Globe className="mr-2 h-4 w-4" />
+                Global HC
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleIdleHealthCheck}
+                disabled={isReloading || jobRunning || cleanupRunning}
+              >
+                <Coffee className="mr-2 h-4 w-4" />
+                Idle HC
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleCleanupNow}
+                disabled={isReloading || jobRunning || cleanupRunning}
+              >
+                {cleanupRunning ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCw className="mr-2 h-4 w-4" />
+                )}
+                Cleanup Now
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleForceCleanup}
+                disabled={isReloading || jobRunning || cleanupRunning}
+              >
+                {jobRunning && activeJob?.kind === "force_cleanup" ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 ) : (
                   <BrushCleaning className="mr-2 h-4 w-4" />
@@ -848,6 +1033,18 @@ export default function ProxiesPage() {
                   <DropdownMenuItem onClick={() => setIsImportDialogOpen(true)}>
                     <Upload className="mr-2 h-4 w-4" />
                     Import from TXT
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={handleBulkTest}
+                    disabled={
+                      Object.keys(rowSelection).length === 0 ||
+                      jobRunning ||
+                      cleanupRunning
+                    }
+                  >
+                    <Zap className="mr-2 h-4 w-4" />
+                    Test selected ({Object.keys(rowSelection).length})
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
@@ -894,19 +1091,23 @@ export default function ProxiesPage() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {forceCleaning && forceCleanupJob && (
+            {jobRunning && activeJob && (
               <div className="space-y-2 rounded-md border p-3">
                 <div className="flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Force cleaning up failed proxies…
+                    {activeJob.kind === "force_cleanup"
+                      ? "Force cleaning up failed proxies…"
+                      : `Health checking proxies (${activeJob.pool_name})…`}
                   </span>
                   <span className="text-muted-foreground">
-                    {forceCleanupJob.progress} / {forceCleanupJob.total}
+                    {activeJob.progress} / {activeJob.total}
+                    {activeJob.active + activeJob.failed > 0 &&
+                      ` · ${activeJob.active} active, ${activeJob.failed} failed`}
                   </span>
                 </div>
                 <Progress
-                  value={forceCleanupJob.total > 0 ? (forceCleanupJob.progress / forceCleanupJob.total) * 100 : 0}
+                  value={activeJob.total > 0 ? (activeJob.progress / activeJob.total) * 100 : 0}
                 />
               </div>
             )}
@@ -921,7 +1122,7 @@ export default function ProxiesPage() {
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="icon" className="relative">
                     <Filter className="h-4 w-4" />
-                    {(statusFilter !== "all" || protocolFilter !== "all") && (
+                    {(statusFilter !== "all" || protocolFilter !== "all" || countryFilter !== "all") && (
                       <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-primary" />
                     )}
                   </Button>
@@ -972,6 +1173,40 @@ export default function ProxiesPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  {geoCountriesLoaded && geoCountries.length > 0 && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <div className="px-2 py-2">
+                        <Label className="text-xs text-muted-foreground mb-2 block">Country</Label>
+                        <Select
+                          value={countryFilter}
+                          onValueChange={(value) => {
+                            setCountryFilter(value)
+                            setPagination(prev => ({ ...prev, page: 1 }))
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="All countries" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">All countries</SelectItem>
+                            {geoCountries.map((c) => (
+                              <SelectItem key={c.country_code} value={c.country_code}>
+                                <span className="flex items-center gap-2">
+                                  <img
+                                    src={`https://flagcdn.com/${c.country_code.toLowerCase()}.svg`}
+                                    alt=""
+                                    className="h-3 w-4 rounded-sm"
+                                  />
+                                  {c.country_name} ({c.total})
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
               <DropdownMenu>

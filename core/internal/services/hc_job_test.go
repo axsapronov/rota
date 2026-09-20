@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/alpkeskin/rota/core/internal/models"
 )
 
 func TestHCJobStore_consumerSurvivesJobPanic(t *testing.T) {
@@ -149,5 +151,78 @@ func TestHCJobStore_queuePending(t *testing.T) {
 	// pending -> Total (10); running -> Total - Progress (15); done -> 0.
 	if got := store.QueuePending(); got != 25 {
 		t.Fatalf("QueuePending = %d, want 25", got)
+	}
+}
+
+// fakeProxyIDsChecker is a scripted proxyIDsCheckerWithProgress for unit tests.
+type fakeProxyIDsChecker struct {
+	results []models.ProxyTestResult
+	err     error
+	calls   atomic.Int32
+}
+
+func (f *fakeProxyIDsChecker) CheckProxiesWithProgress(
+	ctx context.Context,
+	proxyIDs []int,
+	onProgress func(checked, active, failed int),
+	immediate bool,
+) ([]models.ProxyTestResult, error) {
+	f.calls.Add(1)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.results, nil
+}
+
+// TestRunProxyHealthCheckAsync verifies the bulk "test selected" job: it is
+// created with kind=proxy, the selected ids, and a default worker count; the
+// runner applies the checker results and finishes the job done.
+func TestRunProxyHealthCheckAsync(t *testing.T) {
+	// RunProxyHealthCheckAsync enqueues on the global store; give it a queue.
+	ensureGlobalJobStoreQueue(t)
+	store := GetJobStore()
+
+	fake := &fakeProxyIDsChecker{results: []models.ProxyTestResult{
+		{ID: 1, Status: "active"},
+		{ID: 2, Status: "active"},
+		{ID: 3, Status: "failed"},
+	}}
+
+	job, err := RunProxyHealthCheckAsync(context.Background(), fake, []int{1, 2, 3}, 0)
+	if err != nil {
+		t.Fatalf("RunProxyHealthCheckAsync: %v", err)
+	}
+	if job.Kind != HCJobKindProxy {
+		t.Fatalf("job kind = %s, want proxy", job.Kind)
+	}
+	if job.Total != 3 {
+		t.Fatalf("job total = %d, want 3", job.Total)
+	}
+	if len(job.ProxyIDs) != 3 {
+		t.Fatalf("job proxy_ids = %v, want 3 ids", job.ProxyIDs)
+	}
+	if job.Workers != 20 {
+		t.Fatalf("job workers = %d, want default 20", job.Workers)
+	}
+
+	// Run the runner directly (deterministic; the queue consumer may also run
+	// it, which is harmless for a scripted fake).
+	job.run(store, job)
+
+	got, ok := store.Get(job.ID)
+	if !ok {
+		t.Fatal("job not found after run")
+	}
+	if got.Status != HCJobDone {
+		t.Fatalf("status = %s, want done (error: %s)", got.Status, got.Error)
+	}
+	if got.Active != 2 || got.Failed != 1 {
+		t.Fatalf("active/failed = %d/%d, want 2/1", got.Active, got.Failed)
+	}
+	if got.Progress != 3 || got.Total != 3 {
+		t.Fatalf("progress/total = %d/%d, want 3/3", got.Progress, got.Total)
+	}
+	if fake.calls.Load() == 0 {
+		t.Fatal("checker was never called")
 	}
 }

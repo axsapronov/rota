@@ -13,6 +13,12 @@ export interface Proxy {
   tags: string[]
   created_at: string
   updated_at: string
+  // GeoIP fields (populated by enrichment)
+  country_code?: string
+  country_name?: string
+  region_name?: string
+  city_name?: string
+  isp?: string
 }
 
 export interface ProxiesResponse {
@@ -336,8 +342,11 @@ export interface PoolHealthCheckResult {
 
 export type HCJobStatus = "pending" | "running" | "done" | "failed"
 
+export type HCJobKind = "pool" | "proxy" | "orphan" | "idle" | "force_cleanup"
+
 export interface HCJob {
   id: string
+  kind?: HCJobKind
   pool_id: number
   pool_name: string
   status: HCJobStatus

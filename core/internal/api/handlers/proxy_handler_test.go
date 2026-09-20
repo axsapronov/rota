@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,7 +123,7 @@ func TestProxyHandlerTestManualImmediate(t *testing.T) {
 	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: pool})
 	tracker := proxy.NewUsageTracker(repo)
 	healthChecker := proxy.NewHealthChecker(repo, settingsRepo, tracker, logger.New("error"))
-	handler := NewProxyHandler(repo, healthChecker, services.NewForceCleanupService(repo, logger.New("error")), logger.New("error"))
+	handler := NewProxyHandler(repo, healthChecker, services.NewForceCleanupService(repo, logger.New("error")), services.NewProxyCleanupService(repo, settingsRepo, logger.New("error")), logger.New("error"))
 
 	var id int
 	err := pool.QueryRow(ctx,
@@ -167,4 +168,318 @@ func TestProxyHandlerTestManualImmediate(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("proxy status = %q (last_error = %v), want failed with last_error within 5s", status, lastError)
+}
+
+// newTestProxyHandler builds a fully wired handler against the shared test DB.
+func newTestProxyHandler(t *testing.T, pool *pgxpool.Pool) *ProxyHandler {
+	t.Helper()
+	repo := repository.NewProxyRepository(&database.DB{Pool: pool})
+	settingsRepo := repository.NewSettingsRepository(&database.DB{Pool: pool})
+	tracker := proxy.NewUsageTracker(repo)
+	healthChecker := proxy.NewHealthChecker(repo, settingsRepo, tracker, logger.New("error"))
+	return NewProxyHandler(repo, healthChecker,
+		services.NewForceCleanupService(repo, logger.New("error")),
+		services.NewProxyCleanupService(repo, settingsRepo, logger.New("error")),
+		logger.New("error"))
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
+
+// ensureGlobalJobStoreQueue makes the global job store's queue usable for
+// tests that enqueue jobs. The consumer may exit when the test context is
+// cancelled; the queue itself remains, so later enqueues succeed.
+func ensureGlobalJobStoreQueue(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	services.GetJobStore().Start(ctx, nil)
+	t.Cleanup(cancel)
+}
+
+// TestProxyHandlerListCountryFilter verifies the server-side country_code
+// filter: exact match, case-insensitive input, and invalid (too long) codes
+// yielding an empty result instead of an error.
+func TestProxyHandlerListCountryFilter(t *testing.T) {
+	pool := openHandlerTestDB(t)
+	ctx := context.Background()
+	handler := newTestProxyHandler(t, pool)
+
+	const prefix = "country-filter-"
+	// Clean up leftovers from an earlier interrupted run (shared test DB).
+	if _, err := pool.Exec(ctx, `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%"); err != nil {
+		t.Fatalf("clean proxies: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%") //nolint:errcheck
+	})
+
+	for i, cc := range []string{"XX", "XX", "YY"} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO proxies (address, protocol, status, country_code) VALUES ($1, 'http', 'active', $2)`,
+			fmt.Sprintf("%s%d.invalid:8080", prefix, i), cc); err != nil {
+			t.Fatalf("insert proxy %d: %v", i, err)
+		}
+	}
+
+	r := chi.NewRouter()
+	r.Get("/proxies", handler.List)
+
+	getProxies := func(query string) models.ProxyListResponse {
+		req := httptest.NewRequest(http.MethodGet, "/proxies"+query, nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		var res models.ProxyListResponse
+		if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return res
+	}
+
+	if res := getProxies("?country_code=XX"); res.Pagination.Total != 2 {
+		t.Fatalf("country_code=XX total = %d, want 2", res.Pagination.Total)
+	}
+	if res := getProxies("?country_code=xx"); res.Pagination.Total != 2 {
+		t.Fatalf("lowercase country_code=xx total = %d, want 2", res.Pagination.Total)
+	} else {
+		for _, p := range res.Proxies {
+			if p.CountryCode == nil || *p.CountryCode != "XX" {
+				t.Fatalf("lowercase filter returned proxy with country_code = %v, want XX", p.CountryCode)
+			}
+		}
+	}
+	if res := getProxies("?country_code=TOOLONG"); res.Pagination.Total != 0 {
+		t.Fatalf("invalid country_code total = %d, want 0", res.Pagination.Total)
+	}
+	if res := getProxies("?country_code=YY"); res.Pagination.Total != 1 {
+		t.Fatalf("country_code=YY total = %d, want 1", res.Pagination.Total)
+	}
+}
+
+// TestProxyHandlerListLastCheckSort verifies server-side sorting by
+// last_check with NULLS LAST in both directions.
+func TestProxyHandlerListLastCheckSort(t *testing.T) {
+	pool := openHandlerTestDB(t)
+	ctx := context.Background()
+	handler := newTestProxyHandler(t, pool)
+
+	const prefix = "nulls-last-"
+	if _, err := pool.Exec(ctx, `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%"); err != nil {
+		t.Fatalf("clean proxies: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%") //nolint:errcheck
+	})
+
+	now := time.Now()
+	seed := func(addr string, lastCheck *time.Time) {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO proxies (address, protocol, status, last_check) VALUES ($1, 'http', 'active', $2)`,
+			addr, lastCheck); err != nil {
+			t.Fatalf("insert %s: %v", addr, err)
+		}
+	}
+	seed(prefix+"a.invalid:8080", ptrTime(now.Add(-2*time.Hour)))
+	seed(prefix+"b.invalid:8080", ptrTime(now))
+	seed(prefix+"c.invalid:8080", nil)
+
+	r := chi.NewRouter()
+	r.Get("/proxies", handler.List)
+
+	orderedAddresses := func(order string) []string {
+		req := httptest.NewRequest(http.MethodGet,
+			"/proxies?search="+prefix+"&sort=last_check&order="+order, nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		var res models.ProxyListResponse
+		if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		addrs := make([]string, 0, len(res.Proxies))
+		for _, p := range res.Proxies {
+			addrs = append(addrs, p.Address)
+		}
+		return addrs
+	}
+
+	// ASC: oldest first, NULL (c) last.
+	if got := orderedAddresses("asc"); strings.Join(got, ",") != prefix+"a.invalid:8080,"+prefix+"b.invalid:8080,"+prefix+"c.invalid:8080" {
+		t.Fatalf("asc order = %v, want a,b,c (null last)", got)
+	}
+	// DESC: newest first, NULL (c) still last (explicit NULLS LAST).
+	if got := orderedAddresses("desc"); strings.Join(got, ",") != prefix+"b.invalid:8080,"+prefix+"a.invalid:8080,"+prefix+"c.invalid:8080" {
+		t.Fatalf("desc order = %v, want b,a,c (null last)", got)
+	}
+}
+
+// TestProxyHandlerTestBulk verifies the bulk test endpoint: 202 with the job
+// metadata, job status lookup by kind, and 400 on an empty id list.
+func TestProxyHandlerTestBulk(t *testing.T) {
+	pool := openHandlerTestDB(t)
+	ctx := context.Background()
+	handler := newTestProxyHandler(t, pool)
+	ensureGlobalJobStoreQueue(t)
+
+	const prefix = "bulk-test-"
+	if _, err := pool.Exec(ctx, `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%"); err != nil {
+		t.Fatalf("clean proxies: %v", err)
+	}
+	var ids []int
+	for i := 0; i < 2; i++ {
+		var id int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO proxies (address, protocol, status) VALUES ($1, 'http', 'active') RETURNING id`,
+			fmt.Sprintf("%s%d.invalid:8080", prefix, i),
+		).Scan(&id); err != nil {
+			t.Fatalf("insert proxy %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%") //nolint:errcheck
+	})
+
+	r := chi.NewRouter()
+	r.Post("/proxies/test/bulk", handler.TestBulk)
+	r.Get("/proxies/test/{job_id}", handler.TestJobStatus)
+
+	// Empty id list → 400.
+	req := httptest.NewRequest(http.MethodPost, "/proxies/test/bulk",
+		strings.NewReader(`{"proxy_ids": []}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty ids: status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	body, _ := json.Marshal(models.BulkTestProxyRequest{ProxyIDs: ids, Workers: 2})
+	req = httptest.NewRequest(http.MethodPost, "/proxies/test/bulk", strings.NewReader(string(body)))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		JobID  string `json:"job_id"`
+		Status string `json:"status"`
+		Total  int    `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&start); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if start.JobID == "" || start.Status != "pending" || start.Total != 2 {
+		t.Fatalf("start response = %+v, want pending job with total 2", start)
+	}
+
+	// Job status lookup must accept the proxy kind.
+	req = httptest.NewRequest(http.MethodGet, "/proxies/test/"+start.JobID, nil)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("job status: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var job services.HCJob
+	if err := json.NewDecoder(rec.Body).Decode(&job); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	if job.Kind != services.HCJobKindProxy {
+		t.Fatalf("job kind = %s, want proxy", job.Kind)
+	}
+	if len(job.ProxyIDs) != 2 || job.ProxyIDs[0] != ids[0] || job.ProxyIDs[1] != ids[1] {
+		t.Fatalf("job proxy_ids = %v, want %v", job.ProxyIDs, ids)
+	}
+}
+
+// TestProxyHandlerCleanupNow verifies the manual cleanup endpoint: it deletes
+// failed proxies older than max_failed_days (ignoring the Enabled flag) and
+// returns the deleted count.
+func TestProxyHandlerCleanupNow(t *testing.T) {
+	pool := openHandlerTestDB(t)
+	ctx := context.Background()
+	handler := newTestProxyHandler(t, pool)
+
+	const prefix = "cleanup-now-"
+	// Clean up leftovers from an earlier interrupted run (shared test DB).
+	if _, err := pool.Exec(ctx, `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%"); err != nil {
+		t.Fatalf("clean proxies: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM proxies WHERE address LIKE $1`, prefix+"%") //nolint:errcheck
+	})
+
+	// Manual run must work with the cleanup disabled in settings.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO settings (key, value) VALUES ('proxy_cleanup',
+			'{"enabled": false, "max_failed_days": 1, "min_success_rate": 0, "cleanup_interval_hours": 24}'::jsonb)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`); err != nil {
+		t.Fatalf("insert proxy_cleanup settings: %v", err)
+	}
+
+	// The manual delete is global; skip rather than flake if other dead
+	// proxies exist in the shared test DB.
+	var baseline int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM proxies
+		WHERE status = 'failed' AND last_check < NOW() - INTERVAL '1 day'
+	`).Scan(&baseline); err != nil {
+		t.Fatalf("count baseline dead proxies: %v", err)
+	}
+	if baseline > 0 {
+		t.Skipf("shared test DB interference: %d pre-existing dead proxies", baseline)
+	}
+
+	var oldID, freshID int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO proxies (address, protocol, status, last_check)
+		 VALUES ($1, 'http', 'failed', NOW() - INTERVAL '10 days') RETURNING id`,
+		prefix+"old.invalid:8080",
+	).Scan(&oldID); err != nil {
+		t.Fatalf("insert old failed proxy: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO proxies (address, protocol, status, last_check)
+		 VALUES ($1, 'http', 'failed', NOW()) RETURNING id`,
+		prefix+"fresh.invalid:8080",
+	).Scan(&freshID); err != nil {
+		t.Fatalf("insert fresh failed proxy: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Post("/proxies/cleanup/run", handler.CleanupNow)
+
+	req := httptest.NewRequest(http.MethodPost, "/proxies/cleanup/run", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res.Deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", res.Deleted)
+	}
+
+	var oldRemaining, freshRemaining int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxies WHERE id = $1`, oldID).Scan(&oldRemaining); err != nil {
+		t.Fatalf("count old: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxies WHERE id = $1`, freshID).Scan(&freshRemaining); err != nil {
+		t.Fatalf("count fresh: %v", err)
+	}
+	if oldRemaining != 0 {
+		t.Fatal("old failed proxy was not deleted")
+	}
+	if freshRemaining != 1 {
+		t.Fatal("fresh failed proxy was deleted, want it kept")
+	}
 }

@@ -28,7 +28,7 @@ func (r *ProxyRepository) GetDB() *database.DB {
 }
 
 // List retrieves proxies with pagination and filters
-func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, status, protocol, sortField, sortOrder string) ([]models.ProxyWithStats, int, error) {
+func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, status, protocol, countryCode, sortField, sortOrder string) ([]models.ProxyWithStats, int, error) {
 	// Build WHERE clause
 	whereClauses := []string{}
 	args := []interface{}{}
@@ -53,6 +53,12 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		argPos++
 	}
 
+	if countryCode != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("country_code = $%d", argPos))
+		args = append(args, countryCode)
+		argPos++
+	}
+
 	whereClause := ""
 	if len(whereClauses) > 0 {
 		whereClause = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -64,6 +70,7 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		"status":            true,
 		"requests":          true,
 		"avg_response_time": true,
+		"last_check":        true,
 		"created_at":        true,
 	}
 
@@ -73,6 +80,13 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 
 	if sortOrder != "asc" && sortOrder != "desc" {
 		sortOrder = "desc"
+	}
+
+	// Proxies without a check timestamp sort last in both directions
+	// (Postgres defaults to NULLS FIRST for DESC, so be explicit).
+	sortSuffix := ""
+	if sortField == "last_check" {
+		sortSuffix = " NULLS LAST"
 	}
 
 	// Count total
@@ -94,9 +108,9 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 			created_at, updated_at
 		FROM proxies
 		%s
-		ORDER BY %s %s
+		ORDER BY %s %s%s
 		LIMIT $%d OFFSET $%d
-	`, whereClause, sortField, sortOrder, argPos, argPos+1)
+	`, whereClause, sortField, sortOrder, sortSuffix, argPos, argPos+1)
 
 	args = append(args, limit, offset)
 
@@ -287,7 +301,7 @@ func (r *ProxyRepository) DeleteDeadProxies(ctx context.Context, maxFailedDays i
 		tag, err := r.db.Pool.Exec(ctx, `
 			DELETE FROM proxies
 			WHERE status = 'failed'
-			  AND last_check < NOW() - ($1 || ' days')::INTERVAL`,
+			  AND last_check < NOW() - make_interval(days => $1)`,
 			maxFailedDays)
 		if err != nil {
 			return 0, fmt.Errorf("failed to delete dead proxies by age: %w", err)

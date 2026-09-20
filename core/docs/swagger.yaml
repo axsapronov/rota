@@ -1,6 +1,107 @@
 basePath: /api/v1
 definitions:
-  github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings:
+  checkstats.GlobalHealthCheckSnapshot:
+    properties:
+      enabled:
+        type: boolean
+      interval_minutes:
+        type: integer
+      is_running:
+        type: boolean
+      last_checked_proxies:
+        type: integer
+      last_duration_ms:
+        type: integer
+      last_error:
+        type: string
+      last_finished_at:
+        type: string
+      last_started_at:
+        type: string
+      last_status:
+        $ref: '#/definitions/checkstats.GlobalHealthCheckStatus'
+      next_run_at:
+        type: string
+    type: object
+  checkstats.GlobalHealthCheckStatus:
+    enum:
+    - idle
+    - ok
+    - error
+    type: string
+    x-enum-varnames:
+    - GlobalHealthCheckStatusIdle
+    - GlobalHealthCheckStatusOK
+    - GlobalHealthCheckStatusError
+  checkstats.Snapshot:
+    properties:
+      checks_last_minute:
+        type: integer
+      processed_last_10m:
+        type: integer
+      queue_pending:
+        type: integer
+      success_percent_1m:
+        type: number
+    type: object
+  handlers.CPUMetrics:
+    properties:
+      cores:
+        type: integer
+      percentage:
+        type: number
+    type: object
+  handlers.DiskMetrics:
+    properties:
+      free:
+        type: integer
+      percentage:
+        type: number
+      total:
+        type: integer
+      used:
+        type: integer
+    type: object
+  handlers.MemoryMetrics:
+    properties:
+      available:
+        type: integer
+      percentage:
+        type: number
+      total:
+        type: integer
+      used:
+        type: integer
+    type: object
+  handlers.RuntimeMetrics:
+    properties:
+      gc_pause_count:
+        type: integer
+      goroutines:
+        type: integer
+      mem_alloc:
+        type: integer
+      mem_sys:
+        type: integer
+      threads:
+        type: integer
+    type: object
+  handlers.SystemMetrics:
+    properties:
+      cpu:
+        $ref: '#/definitions/handlers.CPUMetrics'
+      disk:
+        $ref: '#/definitions/handlers.DiskMetrics'
+      global_health_check:
+        $ref: '#/definitions/checkstats.GlobalHealthCheckSnapshot'
+      health_check:
+        $ref: '#/definitions/checkstats.Snapshot'
+      memory:
+        $ref: '#/definitions/handlers.MemoryMetrics'
+      runtime:
+        $ref: '#/definitions/handlers.RuntimeMetrics'
+    type: object
+  models.AuthenticationSettings:
     properties:
       enabled:
         description: Enable authentication for proxy requests
@@ -12,17 +113,17 @@ definitions:
         description: Username for proxy authentication
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest:
+  models.BulkCreateProxyRequest:
     properties:
       proxies:
         items:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest'
+          $ref: '#/definitions/models.CreateProxyRequest'
         minItems: 1
         type: array
     required:
     - proxies
     type: object
-  github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest:
+  models.BulkDeleteProxyRequest:
     properties:
       ids:
         items:
@@ -32,14 +133,44 @@ definitions:
     required:
     - ids
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ChartDataPoint:
+  models.BulkTagProxyRequest:
+    properties:
+      add:
+        items:
+          type: string
+        type: array
+      ids:
+        items:
+          type: integer
+        minItems: 1
+        type: array
+      remove:
+        items:
+          type: string
+        type: array
+    required:
+    - ids
+    type: object
+  models.BulkTestProxyRequest:
+    properties:
+      proxy_ids:
+        items:
+          type: integer
+        minItems: 1
+        type: array
+      workers:
+        type: integer
+    required:
+    - proxy_ids
+    type: object
+  models.ChartDataPoint:
     properties:
       time:
         type: string
       value:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest:
+  models.CreateProxyRequest:
     properties:
       address:
         type: string
@@ -53,13 +184,20 @@ definitions:
         - socks4a
         - socks5
         type: string
+      source_id:
+        description: set internally when importing from a source
+        type: integer
+      tags:
+        items:
+          type: string
+        type: array
       username:
         type: string
     required:
     - address
     - protocol
     type: object
-  github_com_alpkeskin_rota_core_internal_models.DashboardStats:
+  models.DashboardStats:
     properties:
       active_proxies:
         type: integer
@@ -78,13 +216,44 @@ definitions:
       total_requests:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ErrorResponse:
+  models.ErrorResponse:
     properties:
       details: {}
       error:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings:
+  models.GeoIPSettings:
+    properties:
+      auto_update:
+        description: Enable automatic DB update on interval
+        type: boolean
+      last_updated_at:
+        description: Timestamp of last successful update
+        type: string
+      maxmind_db_path:
+        description: Path to local .mmdb file
+        type: string
+      maxmind_license_key:
+        description: MaxMind license key for auto-download
+        type: string
+      maxmind_url:
+        description: Custom download URL (optional)
+        type: string
+      provider:
+        description: '"ip-api" or "maxmind"'
+        type: string
+      update_interval_hours:
+        description: How often to update in hours (default 168 = 7 days)
+        type: integer
+    type: object
+  models.GlobalHealthCheckSettings:
+    properties:
+      enabled:
+        type: boolean
+      interval_minutes:
+        type: integer
+    type: object
+  models.HealthCheckSettings:
     properties:
       headers:
         items:
@@ -92,6 +261,9 @@ definitions:
         type: array
       status:
         type: integer
+      strict_tls:
+        description: Enable real TLS certificate validation during health checks
+        type: boolean
       timeout:
         type: integer
       url:
@@ -99,7 +271,7 @@ definitions:
       workers:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.Log:
+  models.Log:
     properties:
       details:
         type: string
@@ -115,16 +287,16 @@ definitions:
       timestamp:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.LogListResponse:
+  models.LogListResponse:
     properties:
       logs:
         items:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.Log'
+          $ref: '#/definitions/models.Log'
         type: array
       pagination:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta'
+        $ref: '#/definitions/models.PaginationMeta'
     type: object
-  github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings:
+  models.LogRetentionSettings:
     properties:
       cleanup_interval_hours:
         description: How often to run cleanup (1, 6, 12, 24)
@@ -139,7 +311,7 @@ definitions:
         description: Days to keep logs (7, 15, 30, 60, 90)
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.LoginRequest:
+  models.LoginRequest:
     properties:
       password:
         type: string
@@ -149,14 +321,14 @@ definitions:
     - password
     - username
     type: object
-  github_com_alpkeskin_rota_core_internal_models.LoginResponse:
+  models.LoginResponse:
     properties:
       token:
         type: string
       user:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.UserInfoResponse'
+        $ref: '#/definitions/models.UserInfoResponse'
     type: object
-  github_com_alpkeskin_rota_core_internal_models.PaginationMeta:
+  models.PaginationMeta:
     properties:
       limit:
         type: integer
@@ -167,39 +339,76 @@ definitions:
       total_pages:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.Proxy:
+  models.Proxy:
     properties:
       address:
         type: string
       avg_response_time:
         type: integer
+      city_name:
+        type: string
+      country_code:
+        description: GeoIP fields
+        type: string
+      country_name:
+        type: string
       created_at:
+        type: string
+      geo_updated_at:
         type: string
       id:
         type: integer
+      isp:
+        type: string
       last_check:
         type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
       protocol:
+        type: string
+      region_name:
         type: string
       requests:
         type: integer
       status:
         type: string
+      tags:
+        description: Tags
+        items:
+          type: string
+        type: array
       updated_at:
         type: string
       username:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ProxyListResponse:
+  models.ProxyCleanupSettings:
+    properties:
+      cleanup_interval_hours:
+        description: How often to run cleanup
+        type: integer
+      enabled:
+        description: Enable automatic dead proxy cleanup
+        type: boolean
+      max_failed_days:
+        description: Remove proxies failed for more than N days
+        type: integer
+      min_success_rate:
+        description: Remove proxies with success rate below X% (0 = disabled)
+        type: number
+    type: object
+  models.ProxyListResponse:
     properties:
       pagination:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta'
+        $ref: '#/definitions/models.PaginationMeta'
       proxies:
         items:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyWithStats'
+          $ref: '#/definitions/models.ProxyWithStats'
         type: array
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ProxyTestResult:
+  models.ProxyTestResult:
     properties:
       address:
         type: string
@@ -214,19 +423,30 @@ definitions:
       tested_at:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ProxyWithStats:
+  models.ProxyWithStats:
     properties:
       address:
         type: string
       avg_response_time:
         type: integer
+      city_name:
+        type: string
+      country_code:
+        description: GeoIP fields
+        type: string
+      country_name:
+        type: string
       created_at:
         type: string
       id:
         type: integer
+      isp:
+        type: string
       last_check:
         type: string
       protocol:
+        type: string
+      region_name:
         type: string
       requests:
         type: integer
@@ -234,12 +454,17 @@ definitions:
         type: string
       success_rate:
         type: number
+      tags:
+        description: Tags
+        items:
+          type: string
+        type: array
       updated_at:
         type: string
       username:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.RateLimitSettings:
+  models.RateLimitSettings:
     properties:
       enabled:
         type: boolean
@@ -249,14 +474,14 @@ definitions:
       max_requests:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData:
+  models.ResponseTimeChartData:
     properties:
       data:
         items:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ChartDataPoint'
+          $ref: '#/definitions/models.ChartDataPoint'
         type: array
     type: object
-  github_com_alpkeskin_rota_core_internal_models.RotationSettings:
+  models.RotationSettings:
     properties:
       allowed_protocols:
         description: '["http", "https", "socks4", "socks4a", "socks5"], empty means
@@ -283,31 +508,37 @@ definitions:
       retries:
         type: integer
       time_based:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings'
+        $ref: '#/definitions/models.TimeBasedSettings'
       timeout:
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.Settings:
+  models.Settings:
     properties:
       authentication:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings'
+        $ref: '#/definitions/models.AuthenticationSettings'
+      geoip:
+        $ref: '#/definitions/models.GeoIPSettings'
+      global_health_check:
+        $ref: '#/definitions/models.GlobalHealthCheckSettings'
       healthcheck:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings'
+        $ref: '#/definitions/models.HealthCheckSettings'
       log_retention:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings'
+        $ref: '#/definitions/models.LogRetentionSettings'
+      proxy_cleanup:
+        $ref: '#/definitions/models.ProxyCleanupSettings'
       rate_limit:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.RateLimitSettings'
+        $ref: '#/definitions/models.RateLimitSettings'
       rotation:
-        $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.RotationSettings'
+        $ref: '#/definitions/models.RotationSettings'
     type: object
-  github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData:
+  models.SuccessRateChartData:
     properties:
       data:
         items:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint'
+          $ref: '#/definitions/models.SuccessRateDataPoint'
         type: array
     type: object
-  github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint:
+  models.SuccessRateDataPoint:
     properties:
       failure:
         type: integer
@@ -316,13 +547,13 @@ definitions:
       time:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings:
+  models.TimeBasedSettings:
     properties:
       interval:
         description: in seconds
         type: integer
     type: object
-  github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest:
+  models.UpdateProxyRequest:
     properties:
       address:
         type: string
@@ -336,66 +567,17 @@ definitions:
         - socks4a
         - socks5
         type: string
+      tags:
+        items:
+          type: string
+        type: array
       username:
         type: string
     type: object
-  github_com_alpkeskin_rota_core_internal_models.UserInfoResponse:
+  models.UserInfoResponse:
     properties:
       username:
         type: string
-    type: object
-  internal_api_handlers.CPUMetrics:
-    properties:
-      cores:
-        type: integer
-      percentage:
-        type: number
-    type: object
-  internal_api_handlers.DiskMetrics:
-    properties:
-      free:
-        type: integer
-      percentage:
-        type: number
-      total:
-        type: integer
-      used:
-        type: integer
-    type: object
-  internal_api_handlers.MemoryMetrics:
-    properties:
-      available:
-        type: integer
-      percentage:
-        type: number
-      total:
-        type: integer
-      used:
-        type: integer
-    type: object
-  internal_api_handlers.RuntimeMetrics:
-    properties:
-      gc_pause_count:
-        type: integer
-      goroutines:
-        type: integer
-      mem_alloc:
-        type: integer
-      mem_sys:
-        type: integer
-      threads:
-        type: integer
-    type: object
-  internal_api_handlers.SystemMetrics:
-    properties:
-      cpu:
-        $ref: '#/definitions/internal_api_handlers.CPUMetrics'
-      disk:
-        $ref: '#/definitions/internal_api_handlers.DiskMetrics'
-      memory:
-        $ref: '#/definitions/internal_api_handlers.MemoryMetrics'
-      runtime:
-        $ref: '#/definitions/internal_api_handlers.RuntimeMetrics'
     type: object
 host: localhost:8001
 info:
@@ -423,22 +605,22 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginRequest'
+          $ref: '#/definitions/models.LoginRequest'
       produces:
       - application/json
       responses:
         "200":
           description: Login successful
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginResponse'
+            $ref: '#/definitions/models.LoginResponse'
         "400":
           description: Invalid request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "401":
           description: Invalid credentials
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: User login
       tags:
       - auth
@@ -457,11 +639,11 @@ paths:
         "200":
           description: Chart data
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData'
+            $ref: '#/definitions/models.ResponseTimeChartData'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Response time chart
       tags:
       - dashboard
@@ -480,11 +662,11 @@ paths:
         "200":
           description: Chart data
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData'
+            $ref: '#/definitions/models.SuccessRateChartData'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Success rate chart
       tags:
       - dashboard
@@ -497,11 +679,11 @@ paths:
         "200":
           description: Dashboard statistics
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.DashboardStats'
+            $ref: '#/definitions/models.DashboardStats'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Dashboard statistics
       tags:
       - dashboard
@@ -519,7 +701,7 @@ paths:
         "503":
           description: Service Unavailable
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Database health
       tags:
       - health
@@ -591,11 +773,11 @@ paths:
         "200":
           description: List of logs
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.LogListResponse'
+            $ref: '#/definitions/models.LogListResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List logs
       tags:
       - logs
@@ -635,11 +817,11 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Export logs
       tags:
       - logs
@@ -652,7 +834,7 @@ paths:
         "200":
           description: System metrics
           schema:
-            $ref: '#/definitions/internal_api_handlers.SystemMetrics'
+            $ref: '#/definitions/handlers.SystemMetrics'
       summary: System metrics
       tags:
       - metrics
@@ -682,6 +864,10 @@ paths:
         in: query
         name: protocol
         type: string
+      - description: Filter by country (ISO 3166-1 alpha-2)
+        in: query
+        name: country_code
+        type: string
       - description: Sort field
         in: query
         name: sort
@@ -696,11 +882,11 @@ paths:
         "200":
           description: List of proxies
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyListResponse'
+            $ref: '#/definitions/models.ProxyListResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List proxies
       tags:
       - proxies
@@ -714,22 +900,22 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest'
+          $ref: '#/definitions/models.CreateProxyRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created proxy
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy'
+            $ref: '#/definitions/models.Proxy'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Create proxy
       tags:
       - proxies
@@ -748,11 +934,11 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Delete proxy
       tags:
       - proxies
@@ -771,26 +957,26 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest'
+          $ref: '#/definitions/models.UpdateProxyRequest'
       produces:
       - application/json
       responses:
         "200":
           description: Updated proxy
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy'
+            $ref: '#/definitions/models.Proxy'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update proxy
       tags:
       - proxies
@@ -809,19 +995,19 @@ paths:
         "200":
           description: Test results
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyTestResult'
+            $ref: '#/definitions/models.ProxyTestResult'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Test proxy
       tags:
       - proxies
@@ -836,7 +1022,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest'
+          $ref: '#/definitions/models.BulkCreateProxyRequest'
       produces:
       - application/json
       responses:
@@ -848,7 +1034,7 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Bulk create proxies
       tags:
       - proxies
@@ -863,7 +1049,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest'
+          $ref: '#/definitions/models.BulkDeleteProxyRequest'
       produces:
       - application/json
       responses:
@@ -875,12 +1061,88 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Bulk delete proxies
+      tags:
+      - proxies
+  /proxies/bulk-tags:
+    post:
+      consumes:
+      - application/json
+      description: Add and/or remove tags on multiple proxies at once
+      parameters:
+      - description: Proxy IDs and tags to add/remove
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.BulkTagProxyRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Update results
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Bulk update proxy tags
+      tags:
+      - proxies
+  /proxies/cleanup/force:
+    post:
+      description: Enqueue async batched deletion of all failed proxies
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Job already running, or nothing to clean
+          schema:
+            additionalProperties: true
+            type: object
+        "202":
+          description: Job accepted
+          schema:
+            additionalProperties: true
+            type: object
+        "429":
+          description: Health check queue is full
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Force cleanup failed proxies
+      tags:
+      - proxies
+  /proxies/cleanup/run:
+    post:
+      description: Synchronously delete dead proxies per cleanup settings
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Cleanup result
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Run proxy cleanup now
       tags:
       - proxies
   /proxies/export:
@@ -908,11 +1170,11 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Export proxies
       tags:
       - proxies
@@ -930,12 +1192,115 @@ paths:
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "503":
           description: Service Unavailable
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Reload proxy pool
+      tags:
+      - proxies
+  /proxies/test/{job_id}:
+    get:
+      description: Get status of an async proxy test job
+      parameters:
+      - description: Job ID
+        in: path
+        name: job_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Job status
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Proxy test job status
+      tags:
+      - proxies
+  /proxies/test/bulk:
+    post:
+      consumes:
+      - application/json
+      description: Enqueue async health check for the given proxy IDs
+      parameters:
+      - description: Proxy IDs to test
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.BulkTestProxyRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Job accepted
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "429":
+          description: Health check queue is full
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Test selected proxies
+      tags:
+      - proxies
+  /proxies/test/global:
+    post:
+      description: Enqueue async health check for orphan (pool-less) proxies
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Job accepted
+          schema:
+            additionalProperties: true
+            type: object
+        "429":
+          description: Health check queue is full
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Test all orphan proxies
+      tags:
+      - proxies
+  /proxies/test/idle:
+    post:
+      description: Enqueue async health check for orphan proxies with status idle
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Job accepted
+          schema:
+            additionalProperties: true
+            type: object
+        "429":
+          description: Health check queue is full
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Test idle orphan proxies
       tags:
       - proxies
   /settings:
@@ -947,11 +1312,11 @@ paths:
         "200":
           description: Current settings
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings'
+            $ref: '#/definitions/models.Settings'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get settings
       tags:
       - settings
@@ -965,7 +1330,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings'
+          $ref: '#/definitions/models.Settings'
       produces:
       - application/json
       responses:
@@ -977,11 +1342,11 @@ paths:
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update settings
       tags:
       - settings
@@ -999,7 +1364,7 @@ paths:
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Reset settings
       tags:
       - settings
@@ -1017,7 +1382,7 @@ paths:
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
+            $ref: '#/definitions/models.ErrorResponse'
       summary: System status
       tags:
       - health

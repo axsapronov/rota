@@ -113,12 +113,15 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
 	forceCleanupSvc := services.NewForceCleanupService(proxyRepo, log)
+	// Created here (before the handlers) so the proxy handler can offer a
+	// manual "cleanup now"; the background loop is started below.
+	cleanupSvc := services.NewProxyCleanupService(proxyRepo, settingsRepo, log)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
-	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, forceCleanupSvc, log)
+	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, forceCleanupSvc, cleanupSvc, log)
 	// Drop cached upstream transports when a proxy is changed/removed so stale
 	// credentials aren't reused by the proxy engine (AUD-16).
 	proxyHandler.SetCacheInvalidator(proxy.ClearTransportCache)
@@ -287,7 +290,6 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 
 	// Alert watcher + proxy cleanup services
 	alertWatcher := services.NewAlertWatcher(poolRepo, log)
-	cleanupSvc := services.NewProxyCleanupService(proxyRepo, settingsRepo, log)
 
 	geoSvc.StartAutoUpdate(svcCtx)
 	sourceSvc.Start(svcCtx)
@@ -400,7 +402,9 @@ func (s *Server) setupRoutes() {
 		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
 		r.Post("/proxies/test/global", s.proxyHandler.TestGlobal)
 		r.Post("/proxies/test/idle", s.proxyHandler.TestIdle)
+		r.Post("/proxies/test/bulk", s.proxyHandler.TestBulk)
 		r.Get("/proxies/test/{job_id}", s.proxyHandler.TestJobStatus)
+		r.Post("/proxies/cleanup/run", s.proxyHandler.CleanupNow)
 		r.Post("/proxies/cleanup/force", s.proxyHandler.ForceCleanup)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
 
