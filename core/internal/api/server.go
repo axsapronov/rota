@@ -112,12 +112,13 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// putting dead proxies back into rotation. Pool-level health checks (cron-
 	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
+	forceCleanupSvc := services.NewForceCleanupService(proxyRepo, log)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
-	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
+	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, forceCleanupSvc, log)
 	// Drop cached upstream transports when a proxy is changed/removed so stale
 	// credentials aren't reused by the proxy engine (AUD-16).
 	proxyHandler.SetCacheInvalidator(proxy.ClearTransportCache)
@@ -400,6 +401,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/proxies/test/global", s.proxyHandler.TestGlobal)
 		r.Post("/proxies/test/idle", s.proxyHandler.TestIdle)
 		r.Get("/proxies/test/{job_id}", s.proxyHandler.TestJobStatus)
+		r.Post("/proxies/cleanup/force", s.proxyHandler.ForceCleanup)
 		r.Post("/proxies/reload", s.ReloadProxyPool)
 
 		// System logs

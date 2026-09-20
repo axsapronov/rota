@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -30,6 +31,7 @@ type HealthChecker interface {
 type ProxyHandler struct {
 	proxyRepo     *repository.ProxyRepository
 	healthChecker HealthChecker
+	forceCleanup  *services.ForceCleanupService
 	logger        *logger.Logger
 
 	// invalidateCache clears the proxy engine's transport cache after a proxy
@@ -38,10 +40,11 @@ type ProxyHandler struct {
 }
 
 // NewProxyHandler creates a new ProxyHandler
-func NewProxyHandler(proxyRepo *repository.ProxyRepository, healthChecker HealthChecker, log *logger.Logger) *ProxyHandler {
+func NewProxyHandler(proxyRepo *repository.ProxyRepository, healthChecker HealthChecker, forceCleanup *services.ForceCleanupService, log *logger.Logger) *ProxyHandler {
 	return &ProxyHandler{
 		proxyRepo:     proxyRepo,
 		healthChecker: healthChecker,
+		forceCleanup:  forceCleanup,
 		logger:        log,
 	}
 }
@@ -505,6 +508,54 @@ func (h *ProxyHandler) TestJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.jsonResponse(w, http.StatusOK, job)
+}
+
+// ForceCleanup enqueues an async force cleanup of all failed proxies and
+// returns the job immediately.
+//
+//	@Summary		Force cleanup failed proxies
+//	@Description	Enqueue async batched deletion of all failed proxies
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		202	{object}	map[string]interface{}	"Job accepted"
+//	@Success		200	{object}	map[string]interface{}	"Job already running, or nothing to clean"
+//	@Failure		429	{object}	models.ErrorResponse	"Health check queue is full"
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/cleanup/force [post]
+func (h *ProxyHandler) ForceCleanup(w http.ResponseWriter, r *http.Request) {
+	job, alreadyRunning, err := h.forceCleanup.StartForceCleanup(r.Context())
+	if err != nil {
+		if errors.Is(err, services.ErrQueueFull) {
+			h.logger.Warn("failed to enqueue force cleanup: queue full")
+			h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
+			return
+		}
+		h.logger.Error("failed to start force cleanup", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to start force cleanup")
+		return
+	}
+
+	if job == nil {
+		// No failed proxies to clean.
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"job_id":          nil,
+			"status":          "idle",
+			"total":           0,
+			"already_running": false,
+		})
+		return
+	}
+
+	statusCode := http.StatusAccepted
+	if alreadyRunning {
+		statusCode = http.StatusOK
+	}
+	h.jsonResponse(w, statusCode, map[string]interface{}{
+		"job_id":          job.ID,
+		"status":          job.Status,
+		"total":           job.Total,
+		"already_running": alreadyRunning,
+	})
 }
 
 // Export handles proxy export

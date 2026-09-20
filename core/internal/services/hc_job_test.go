@@ -109,6 +109,34 @@ func TestHCJobStore_queueFullReturnsError(t *testing.T) {
 	}
 }
 
+func TestHCJobStore_FindActiveByKind(t *testing.T) {
+	store := newHCJobStore(8)
+	now := time.Now()
+
+	store.mu.Lock()
+	store.jobs["done"] = &HCJob{ID: "done", Kind: HCJobKindForceCleanup, Status: HCJobDone, StartedAt: now.Add(2 * time.Minute)}
+	store.jobs["running"] = &HCJob{ID: "running", Kind: HCJobKindForceCleanup, Status: HCJobRunning, StartedAt: now}
+	store.jobs["other"] = &HCJob{ID: "other", Kind: HCJobKindPool, Status: HCJobRunning, StartedAt: now.Add(3 * time.Minute)}
+	store.mu.Unlock()
+
+	if j, ok := store.FindActiveByKind(HCJobKindForceCleanup); !ok || j.ID != "running" {
+		t.Fatalf("FindActiveByKind = (%v, %v), want the running job", j, ok)
+	}
+
+	// A newer pending job of the same kind takes precedence.
+	store.mu.Lock()
+	store.jobs["pending"] = &HCJob{ID: "pending", Kind: HCJobKindForceCleanup, Status: HCJobPending, StartedAt: now.Add(4 * time.Minute)}
+	store.mu.Unlock()
+
+	if j, ok := store.FindActiveByKind(HCJobKindForceCleanup); !ok || j.ID != "pending" {
+		t.Fatalf("FindActiveByKind = (%v, %v), want the newest pending job", j, ok)
+	}
+
+	if _, ok := store.FindActiveByKind(HCJobKindProxy); ok {
+		t.Fatal("FindActiveByKind found a job for a kind with no active jobs")
+	}
+}
+
 func TestHCJobStore_queuePending(t *testing.T) {
 	store := newHCJobStore(8)
 

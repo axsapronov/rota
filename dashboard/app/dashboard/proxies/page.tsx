@@ -25,6 +25,7 @@ import {
   AlertCircle,
   Filter,
   Tag,
+  BrushCleaning,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -68,9 +69,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Label } from "@/components/ui/label"
+import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api } from "@/lib/api"
-import { Proxy } from "@/lib/types"
+import { HCJob, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
 import { TagInput } from "@/components/tag-input"
 
@@ -127,6 +129,13 @@ export default function ProxiesPage() {
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
    const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
    const [deleteAllConfirm, setDeleteAllConfirm] = React.useState(false)
+
+  // Force cleanup of failed proxies
+  const [forceCleanupDialogOpen, setForceCleanupDialogOpen] = React.useState(false)
+  const [forceCleaning, setForceCleaning] = React.useState(false)
+  const [forceCleanupJob, setForceCleanupJob] = React.useState<HCJob | null>(null)
+  const [failedCount, setFailedCount] = React.useState<number | null>(null)
+  const forceCleanupPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Debounce search query
   React.useEffect(() => {
@@ -484,6 +493,72 @@ export default function ProxiesPage() {
     }
   }
 
+  const stopForceCleanupPoll = React.useCallback(() => {
+    if (forceCleanupPollRef.current) {
+      clearInterval(forceCleanupPollRef.current)
+      forceCleanupPollRef.current = null
+    }
+  }, [])
+
+  // Cleanup on unmount
+  React.useEffect(() => () => stopForceCleanupPoll(), [stopForceCleanupPoll])
+
+  const handleForceCleanup = async () => {
+    try {
+      const res = await api.getProxies({ status: "failed", page: 1, limit: 1 })
+      if (res.pagination.total === 0) {
+        toast.success("Nothing to clean", "No failed proxies found")
+        return
+      }
+      setFailedCount(res.pagination.total)
+      setForceCleanupDialogOpen(true)
+    } catch (error) {
+      console.error("Failed to count failed proxies:", error)
+      toast.error("Failed to count failed proxies", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const confirmForceCleanup = async () => {
+    setForceCleanupDialogOpen(false)
+    setForceCleaning(true)
+    setForceCleanupJob(null)
+    stopForceCleanupPoll()
+    try {
+      const res = await api.startForceCleanup()
+      if (res.job_id === null) {
+        // Race: the proxies recovered between the count and the start.
+        toast.success("Nothing to clean", "No failed proxies found")
+        setForceCleaning(false)
+        return
+      }
+      // already_running: poll the existing job; new job: poll the new one.
+      forceCleanupPollRef.current = setInterval(async () => {
+        try {
+          const job = await api.getProxyTestJob(res.job_id!)
+          setForceCleanupJob(job)
+          if (job.status === "done") {
+            stopForceCleanupPoll()
+            setForceCleaning(false)
+            setForceCleanupJob(null)
+            toast.success(`Removed ${job.progress} failed proxies`)
+            fetchProxies()
+          } else if (job.status === "failed") {
+            stopForceCleanupPoll()
+            setForceCleaning(false)
+            toast.error(job.error || "Force cleanup failed")
+          }
+        } catch {
+          stopForceCleanupPoll()
+          setForceCleaning(false)
+        }
+      }, 1500)
+    } catch (error) {
+      console.error("Failed to start force cleanup:", error)
+      toast.error("Failed to start force cleanup", error instanceof Error ? error.message : "Unknown error")
+      setForceCleaning(false)
+    }
+  }
+
   const columns: ColumnDef<Proxy>[] = [
     {
       id: "select",
@@ -750,6 +825,18 @@ export default function ProxiesPage() {
                 <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
                 Reload Pool
               </Button>
+              <Button
+                variant="outline"
+                onClick={handleForceCleanup}
+                disabled={isReloading || forceCleaning}
+              >
+                {forceCleaning ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <BrushCleaning className="mr-2 h-4 w-4" />
+                )}
+                Force Cleanup
+              </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline">
@@ -807,6 +894,22 @@ export default function ProxiesPage() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            {forceCleaning && forceCleanupJob && (
+              <div className="space-y-2 rounded-md border p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Force cleaning up failed proxies…
+                  </span>
+                  <span className="text-muted-foreground">
+                    {forceCleanupJob.progress} / {forceCleanupJob.total}
+                  </span>
+                </div>
+                <Progress
+                  value={forceCleanupJob.total > 0 ? (forceCleanupJob.progress / forceCleanupJob.total) * 100 : 0}
+                />
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <Input
                 placeholder="Search by address..."
@@ -1477,23 +1580,48 @@ export default function ProxiesPage() {
          </AlertDialogContent>
        </AlertDialog>
 
-       <AlertDialog open={deleteAllConfirm} onOpenChange={setDeleteAllConfirm}>
-         <AlertDialogContent>
-           <AlertDialogHeader>
-             <AlertDialogTitle>Delete ALL proxies?</AlertDialogTitle>
-             <AlertDialogDescription>
-               This will permanently delete <strong>every proxy</strong> in the database,
-               including those in pools. This action cannot be undone.
-             </AlertDialogDescription>
-           </AlertDialogHeader>
-           <AlertDialogFooter>
-             <AlertDialogCancel>Cancel</AlertDialogCancel>
-             <AlertDialogAction onClick={confirmDeleteAll} className="bg-red-600 hover:bg-red-700">
-               Delete All
-             </AlertDialogAction>
-           </AlertDialogFooter>
-         </AlertDialogContent>
-       </AlertDialog>
+        <AlertDialog open={deleteAllConfirm} onOpenChange={setDeleteAllConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete ALL proxies?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will permanently delete <strong>every proxy</strong> in the database,
+                including those in pools. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={confirmDeleteAll} className="bg-red-600 hover:bg-red-700">
+                Delete All
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+      {/* Force Cleanup Confirmation Dialog */}
+      <AlertDialog
+        open={forceCleanupDialogOpen}
+        onOpenChange={(open) => {
+          setForceCleanupDialogOpen(open)
+          if (!open) setFailedCount(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clean up {failedCount ?? 0} failed proxies?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete all proxies currently marked as failed,
+              including those in pools. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmForceCleanup} className="bg-red-600 hover:bg-red-700">
+              Force Cleanup
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
