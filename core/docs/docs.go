@@ -42,7 +42,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginRequest"
+                            "$ref": "#/definitions/models.LoginRequest"
                         }
                     }
                 ],
@@ -50,19 +50,19 @@ const docTemplate = `{
                     "200": {
                         "description": "Login successful",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginResponse"
+                            "$ref": "#/definitions/models.LoginResponse"
                         }
                     },
                     "400": {
                         "description": "Invalid request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "401": {
                         "description": "Invalid credentials",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -91,13 +91,13 @@ const docTemplate = `{
                     "200": {
                         "description": "Chart data",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData"
+                            "$ref": "#/definitions/models.ResponseTimeChartData"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -126,13 +126,13 @@ const docTemplate = `{
                     "200": {
                         "description": "Chart data",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData"
+                            "$ref": "#/definitions/models.SuccessRateChartData"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -152,13 +152,13 @@ const docTemplate = `{
                     "200": {
                         "description": "Dashboard statistics",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.DashboardStats"
+                            "$ref": "#/definitions/models.DashboardStats"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -185,7 +185,7 @@ const docTemplate = `{
                     "503": {
                         "description": "Service Unavailable",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -293,13 +293,13 @@ const docTemplate = `{
                     "200": {
                         "description": "List of logs",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LogListResponse"
+                            "$ref": "#/definitions/models.LogListResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -359,13 +359,13 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -385,7 +385,7 @@ const docTemplate = `{
                     "200": {
                         "description": "System metrics",
                         "schema": {
-                            "$ref": "#/definitions/internal_api_handlers.SystemMetrics"
+                            "$ref": "#/definitions/handlers.SystemMetrics"
                         }
                     }
                 }
@@ -436,6 +436,12 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
+                        "description": "Filter by country (ISO 3166-1 alpha-2)",
+                        "name": "country_code",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Sort field",
                         "name": "sort",
                         "in": "query"
@@ -451,13 +457,13 @@ const docTemplate = `{
                     "200": {
                         "description": "List of proxies",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyListResponse"
+                            "$ref": "#/definitions/models.ProxyListResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -481,7 +487,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest"
+                            "$ref": "#/definitions/models.CreateProxyRequest"
                         }
                     }
                 ],
@@ -489,19 +495,19 @@ const docTemplate = `{
                     "201": {
                         "description": "Created proxy",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy"
+                            "$ref": "#/definitions/models.Proxy"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -527,7 +533,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest"
+                            "$ref": "#/definitions/models.BulkCreateProxyRequest"
                         }
                     }
                 ],
@@ -542,7 +548,7 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -568,7 +574,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest"
+                            "$ref": "#/definitions/models.BulkDeleteProxyRequest"
                         }
                     }
                 ],
@@ -583,13 +589,127 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/bulk-tags": {
+            "post": {
+                "description": "Add and/or remove tags on multiple proxies at once",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Bulk update proxy tags",
+                "parameters": [
+                    {
+                        "description": "Proxy IDs and tags to add/remove",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.BulkTagProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Update results",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/cleanup/force": {
+            "post": {
+                "description": "Enqueue async batched deletion of all failed proxies",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Force cleanup failed proxies",
+                "responses": {
+                    "200": {
+                        "description": "Job already running, or nothing to clean",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "202": {
+                        "description": "Job accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "429": {
+                        "description": "Health check queue is full",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/cleanup/run": {
+            "post": {
+                "description": "Synchronously delete dead proxies per cleanup settings",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Run proxy cleanup now",
+                "responses": {
+                    "200": {
+                        "description": "Cleanup result",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -632,13 +752,13 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -665,13 +785,168 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "503": {
                         "description": "Service Unavailable",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/test/bulk": {
+            "post": {
+                "description": "Enqueue async health check for the given proxy IDs",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Test selected proxies",
+                "parameters": [
+                    {
+                        "description": "Proxy IDs to test",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.BulkTestProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Job accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Health check queue is full",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/test/global": {
+            "post": {
+                "description": "Enqueue async health check for orphan (pool-less) proxies",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Test all orphan proxies",
+                "responses": {
+                    "202": {
+                        "description": "Job accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "429": {
+                        "description": "Health check queue is full",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/test/idle": {
+            "post": {
+                "description": "Enqueue async health check for orphan proxies with status idle",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Test idle orphan proxies",
+                "responses": {
+                    "202": {
+                        "description": "Job accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "429": {
+                        "description": "Health check queue is full",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/test/{job_id}": {
+            "get": {
+                "description": "Get status of an async proxy test job",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Proxy test job status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job ID",
+                        "name": "job_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Job status",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -704,7 +979,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest"
+                            "$ref": "#/definitions/models.UpdateProxyRequest"
                         }
                     }
                 ],
@@ -712,25 +987,25 @@ const docTemplate = `{
                     "200": {
                         "description": "Updated proxy",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy"
+                            "$ref": "#/definitions/models.Proxy"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -757,13 +1032,13 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -792,25 +1067,25 @@ const docTemplate = `{
                     "200": {
                         "description": "Test results",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyTestResult"
+                            "$ref": "#/definitions/models.ProxyTestResult"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -830,13 +1105,13 @@ const docTemplate = `{
                     "200": {
                         "description": "Current settings",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings"
+                            "$ref": "#/definitions/models.Settings"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -860,7 +1135,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings"
+                            "$ref": "#/definitions/models.Settings"
                         }
                     }
                 ],
@@ -875,13 +1150,13 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -908,7 +1183,7 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -935,7 +1210,7 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                            "$ref": "#/definitions/models.ErrorResponse"
                         }
                     }
                 }
@@ -943,7 +1218,160 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings": {
+        "checkstats.GlobalHealthCheckSnapshot": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "interval_minutes": {
+                    "type": "integer"
+                },
+                "is_running": {
+                    "type": "boolean"
+                },
+                "last_checked_proxies": {
+                    "type": "integer"
+                },
+                "last_duration_ms": {
+                    "type": "integer"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_finished_at": {
+                    "type": "string"
+                },
+                "last_started_at": {
+                    "type": "string"
+                },
+                "last_status": {
+                    "$ref": "#/definitions/checkstats.GlobalHealthCheckStatus"
+                },
+                "next_run_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "checkstats.GlobalHealthCheckStatus": {
+            "type": "string",
+            "enum": [
+                "idle",
+                "ok",
+                "error"
+            ],
+            "x-enum-varnames": [
+                "GlobalHealthCheckStatusIdle",
+                "GlobalHealthCheckStatusOK",
+                "GlobalHealthCheckStatusError"
+            ]
+        },
+        "checkstats.Snapshot": {
+            "type": "object",
+            "properties": {
+                "checks_last_minute": {
+                    "type": "integer"
+                },
+                "processed_last_10m": {
+                    "type": "integer"
+                },
+                "queue_pending": {
+                    "type": "integer"
+                },
+                "success_percent_1m": {
+                    "type": "number"
+                }
+            }
+        },
+        "handlers.CPUMetrics": {
+            "type": "object",
+            "properties": {
+                "cores": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                }
+            }
+        },
+        "handlers.DiskMetrics": {
+            "type": "object",
+            "properties": {
+                "free": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "used": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.MemoryMetrics": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "used": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.RuntimeMetrics": {
+            "type": "object",
+            "properties": {
+                "gc_pause_count": {
+                    "type": "integer"
+                },
+                "goroutines": {
+                    "type": "integer"
+                },
+                "mem_alloc": {
+                    "type": "integer"
+                },
+                "mem_sys": {
+                    "type": "integer"
+                },
+                "threads": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.SystemMetrics": {
+            "type": "object",
+            "properties": {
+                "cpu": {
+                    "$ref": "#/definitions/handlers.CPUMetrics"
+                },
+                "disk": {
+                    "$ref": "#/definitions/handlers.DiskMetrics"
+                },
+                "global_health_check": {
+                    "$ref": "#/definitions/checkstats.GlobalHealthCheckSnapshot"
+                },
+                "health_check": {
+                    "$ref": "#/definitions/checkstats.Snapshot"
+                },
+                "memory": {
+                    "$ref": "#/definitions/handlers.MemoryMetrics"
+                },
+                "runtime": {
+                    "$ref": "#/definitions/handlers.RuntimeMetrics"
+                }
+            }
+        },
+        "models.AuthenticationSettings": {
             "type": "object",
             "properties": {
                 "enabled": {
@@ -960,7 +1388,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest": {
+        "models.BulkCreateProxyRequest": {
             "type": "object",
             "required": [
                 "proxies"
@@ -970,12 +1398,12 @@ const docTemplate = `{
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest"
+                        "$ref": "#/definitions/models.CreateProxyRequest"
                     }
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest": {
+        "models.BulkDeleteProxyRequest": {
             "type": "object",
             "required": [
                 "ids"
@@ -990,7 +1418,52 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ChartDataPoint": {
+        "models.BulkTagProxyRequest": {
+            "type": "object",
+            "required": [
+                "ids"
+            ],
+            "properties": {
+                "add": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "remove": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "models.BulkTestProxyRequest": {
+            "type": "object",
+            "required": [
+                "proxy_ids"
+            ],
+            "properties": {
+                "proxy_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "workers": {
+                    "type": "integer"
+                }
+            }
+        },
+        "models.ChartDataPoint": {
             "type": "object",
             "properties": {
                 "time": {
@@ -1001,7 +1474,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest": {
+        "models.CreateProxyRequest": {
             "type": "object",
             "required": [
                 "address",
@@ -1024,12 +1497,22 @@ const docTemplate = `{
                         "socks5"
                     ]
                 },
+                "source_id": {
+                    "description": "set internally when importing from a source",
+                    "type": "integer"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "username": {
                     "type": "string"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.DashboardStats": {
+        "models.DashboardStats": {
             "type": "object",
             "properties": {
                 "active_proxies": {
@@ -1058,7 +1541,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ErrorResponse": {
+        "models.ErrorResponse": {
             "type": "object",
             "properties": {
                 "details": {},
@@ -1067,7 +1550,51 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings": {
+        "models.GeoIPSettings": {
+            "type": "object",
+            "properties": {
+                "auto_update": {
+                    "description": "Enable automatic DB update on interval",
+                    "type": "boolean"
+                },
+                "last_updated_at": {
+                    "description": "Timestamp of last successful update",
+                    "type": "string"
+                },
+                "maxmind_db_path": {
+                    "description": "Path to local .mmdb file",
+                    "type": "string"
+                },
+                "maxmind_license_key": {
+                    "description": "MaxMind license key for auto-download",
+                    "type": "string"
+                },
+                "maxmind_url": {
+                    "description": "Custom download URL (optional)",
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "\"ip-api\" or \"maxmind\"",
+                    "type": "string"
+                },
+                "update_interval_hours": {
+                    "description": "How often to update in hours (default 168 = 7 days)",
+                    "type": "integer"
+                }
+            }
+        },
+        "models.GlobalHealthCheckSettings": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "interval_minutes": {
+                    "type": "integer"
+                }
+            }
+        },
+        "models.HealthCheckSettings": {
             "type": "object",
             "properties": {
                 "headers": {
@@ -1078,6 +1605,10 @@ const docTemplate = `{
                 },
                 "status": {
                     "type": "integer"
+                },
+                "strict_tls": {
+                    "description": "Enable real TLS certificate validation during health checks",
+                    "type": "boolean"
                 },
                 "timeout": {
                     "type": "integer"
@@ -1090,7 +1621,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.Log": {
+        "models.Log": {
             "type": "object",
             "properties": {
                 "details": {
@@ -1114,21 +1645,21 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.LogListResponse": {
+        "models.LogListResponse": {
             "type": "object",
             "properties": {
                 "logs": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Log"
+                        "$ref": "#/definitions/models.Log"
                     }
                 },
                 "pagination": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta"
+                    "$ref": "#/definitions/models.PaginationMeta"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings": {
+        "models.LogRetentionSettings": {
             "type": "object",
             "properties": {
                 "cleanup_interval_hours": {
@@ -1149,7 +1680,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.LoginRequest": {
+        "models.LoginRequest": {
             "type": "object",
             "required": [
                 "password",
@@ -1164,18 +1695,18 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.LoginResponse": {
+        "models.LoginResponse": {
             "type": "object",
             "properties": {
                 "token": {
                     "type": "string"
                 },
                 "user": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.UserInfoResponse"
+                    "$ref": "#/definitions/models.UserInfoResponse"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.PaginationMeta": {
+        "models.PaginationMeta": {
             "type": "object",
             "properties": {
                 "limit": {
@@ -1192,7 +1723,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.Proxy": {
+        "models.Proxy": {
             "type": "object",
             "properties": {
                 "address": {
@@ -1201,16 +1732,41 @@ const docTemplate = `{
                 "avg_response_time": {
                     "type": "integer"
                 },
+                "city_name": {
+                    "type": "string"
+                },
+                "country_code": {
+                    "description": "GeoIP fields",
+                    "type": "string"
+                },
+                "country_name": {
+                    "type": "string"
+                },
                 "created_at": {
+                    "type": "string"
+                },
+                "geo_updated_at": {
                     "type": "string"
                 },
                 "id": {
                     "type": "integer"
                 },
+                "isp": {
+                    "type": "string"
+                },
                 "last_check": {
                     "type": "string"
                 },
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
                 "protocol": {
+                    "type": "string"
+                },
+                "region_name": {
                     "type": "string"
                 },
                 "requests": {
@@ -1218,6 +1774,13 @@ const docTemplate = `{
                 },
                 "status": {
                     "type": "string"
+                },
+                "tags": {
+                    "description": "Tags",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "updated_at": {
                     "type": "string"
@@ -1227,21 +1790,42 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ProxyListResponse": {
+        "models.ProxyCleanupSettings": {
+            "type": "object",
+            "properties": {
+                "cleanup_interval_hours": {
+                    "description": "How often to run cleanup",
+                    "type": "integer"
+                },
+                "enabled": {
+                    "description": "Enable automatic dead proxy cleanup",
+                    "type": "boolean"
+                },
+                "max_failed_days": {
+                    "description": "Remove proxies failed for more than N days",
+                    "type": "integer"
+                },
+                "min_success_rate": {
+                    "description": "Remove proxies with success rate below X% (0 = disabled)",
+                    "type": "number"
+                }
+            }
+        },
+        "models.ProxyListResponse": {
             "type": "object",
             "properties": {
                 "pagination": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta"
+                    "$ref": "#/definitions/models.PaginationMeta"
                 },
                 "proxies": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyWithStats"
+                        "$ref": "#/definitions/models.ProxyWithStats"
                     }
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ProxyTestResult": {
+        "models.ProxyTestResult": {
             "type": "object",
             "properties": {
                 "address": {
@@ -1264,7 +1848,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ProxyWithStats": {
+        "models.ProxyWithStats": {
             "type": "object",
             "properties": {
                 "address": {
@@ -1273,16 +1857,32 @@ const docTemplate = `{
                 "avg_response_time": {
                     "type": "integer"
                 },
+                "city_name": {
+                    "type": "string"
+                },
+                "country_code": {
+                    "description": "GeoIP fields",
+                    "type": "string"
+                },
+                "country_name": {
+                    "type": "string"
+                },
                 "created_at": {
                     "type": "string"
                 },
                 "id": {
                     "type": "integer"
                 },
+                "isp": {
+                    "type": "string"
+                },
                 "last_check": {
                     "type": "string"
                 },
                 "protocol": {
+                    "type": "string"
+                },
+                "region_name": {
                     "type": "string"
                 },
                 "requests": {
@@ -1294,6 +1894,13 @@ const docTemplate = `{
                 "success_rate": {
                     "type": "number"
                 },
+                "tags": {
+                    "description": "Tags",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "updated_at": {
                     "type": "string"
                 },
@@ -1302,7 +1909,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.RateLimitSettings": {
+        "models.RateLimitSettings": {
             "type": "object",
             "properties": {
                 "enabled": {
@@ -1317,18 +1924,18 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData": {
+        "models.ResponseTimeChartData": {
             "type": "object",
             "properties": {
                 "data": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ChartDataPoint"
+                        "$ref": "#/definitions/models.ChartDataPoint"
                     }
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.RotationSettings": {
+        "models.RotationSettings": {
             "type": "object",
             "properties": {
                 "allowed_protocols": {
@@ -1365,45 +1972,54 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "time_based": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings"
+                    "$ref": "#/definitions/models.TimeBasedSettings"
                 },
                 "timeout": {
                     "type": "integer"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.Settings": {
+        "models.Settings": {
             "type": "object",
             "properties": {
                 "authentication": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings"
+                    "$ref": "#/definitions/models.AuthenticationSettings"
+                },
+                "geoip": {
+                    "$ref": "#/definitions/models.GeoIPSettings"
+                },
+                "global_health_check": {
+                    "$ref": "#/definitions/models.GlobalHealthCheckSettings"
                 },
                 "healthcheck": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings"
+                    "$ref": "#/definitions/models.HealthCheckSettings"
                 },
                 "log_retention": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings"
+                    "$ref": "#/definitions/models.LogRetentionSettings"
+                },
+                "proxy_cleanup": {
+                    "$ref": "#/definitions/models.ProxyCleanupSettings"
                 },
                 "rate_limit": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.RateLimitSettings"
+                    "$ref": "#/definitions/models.RateLimitSettings"
                 },
                 "rotation": {
-                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.RotationSettings"
+                    "$ref": "#/definitions/models.RotationSettings"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData": {
+        "models.SuccessRateChartData": {
             "type": "object",
             "properties": {
                 "data": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint"
+                        "$ref": "#/definitions/models.SuccessRateDataPoint"
                     }
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint": {
+        "models.SuccessRateDataPoint": {
             "type": "object",
             "properties": {
                 "failure": {
@@ -1417,7 +2033,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings": {
+        "models.TimeBasedSettings": {
             "type": "object",
             "properties": {
                 "interval": {
@@ -1426,7 +2042,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest": {
+        "models.UpdateProxyRequest": {
             "type": "object",
             "properties": {
                 "address": {
@@ -1445,98 +2061,22 @@ const docTemplate = `{
                         "socks5"
                     ]
                 },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "username": {
                     "type": "string"
                 }
             }
         },
-        "github_com_alpkeskin_rota_core_internal_models.UserInfoResponse": {
+        "models.UserInfoResponse": {
             "type": "object",
             "properties": {
                 "username": {
                     "type": "string"
-                }
-            }
-        },
-        "internal_api_handlers.CPUMetrics": {
-            "type": "object",
-            "properties": {
-                "cores": {
-                    "type": "integer"
-                },
-                "percentage": {
-                    "type": "number"
-                }
-            }
-        },
-        "internal_api_handlers.DiskMetrics": {
-            "type": "object",
-            "properties": {
-                "free": {
-                    "type": "integer"
-                },
-                "percentage": {
-                    "type": "number"
-                },
-                "total": {
-                    "type": "integer"
-                },
-                "used": {
-                    "type": "integer"
-                }
-            }
-        },
-        "internal_api_handlers.MemoryMetrics": {
-            "type": "object",
-            "properties": {
-                "available": {
-                    "type": "integer"
-                },
-                "percentage": {
-                    "type": "number"
-                },
-                "total": {
-                    "type": "integer"
-                },
-                "used": {
-                    "type": "integer"
-                }
-            }
-        },
-        "internal_api_handlers.RuntimeMetrics": {
-            "type": "object",
-            "properties": {
-                "gc_pause_count": {
-                    "type": "integer"
-                },
-                "goroutines": {
-                    "type": "integer"
-                },
-                "mem_alloc": {
-                    "type": "integer"
-                },
-                "mem_sys": {
-                    "type": "integer"
-                },
-                "threads": {
-                    "type": "integer"
-                }
-            }
-        },
-        "internal_api_handlers.SystemMetrics": {
-            "type": "object",
-            "properties": {
-                "cpu": {
-                    "$ref": "#/definitions/internal_api_handlers.CPUMetrics"
-                },
-                "disk": {
-                    "$ref": "#/definitions/internal_api_handlers.DiskMetrics"
-                },
-                "memory": {
-                    "$ref": "#/definitions/internal_api_handlers.MemoryMetrics"
-                },
-                "runtime": {
-                    "$ref": "#/definitions/internal_api_handlers.RuntimeMetrics"
                 }
             }
         }

@@ -25,6 +25,7 @@ type HealthChecker interface {
 	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
 	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
 	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -32,6 +33,7 @@ type ProxyHandler struct {
 	proxyRepo     *repository.ProxyRepository
 	healthChecker HealthChecker
 	forceCleanup  *services.ForceCleanupService
+	proxyCleanup  *services.ProxyCleanupService
 	logger        *logger.Logger
 
 	// invalidateCache clears the proxy engine's transport cache after a proxy
@@ -40,11 +42,12 @@ type ProxyHandler struct {
 }
 
 // NewProxyHandler creates a new ProxyHandler
-func NewProxyHandler(proxyRepo *repository.ProxyRepository, healthChecker HealthChecker, forceCleanup *services.ForceCleanupService, log *logger.Logger) *ProxyHandler {
+func NewProxyHandler(proxyRepo *repository.ProxyRepository, healthChecker HealthChecker, forceCleanup *services.ForceCleanupService, proxyCleanup *services.ProxyCleanupService, log *logger.Logger) *ProxyHandler {
 	return &ProxyHandler{
 		proxyRepo:     proxyRepo,
 		healthChecker: healthChecker,
 		forceCleanup:  forceCleanup,
+		proxyCleanup:  proxyCleanup,
 		logger:        log,
 	}
 }
@@ -73,6 +76,7 @@ func (h *ProxyHandler) onProxyChange() {
 //	@Param			search		query		string						false	"Search term"
 //	@Param			status		query		string						false	"Filter by status"
 //	@Param			protocol	query		string						false	"Filter by protocol"
+//	@Param			country_code	query	string						false	"Filter by country (ISO 3166-1 alpha-2)"
 //	@Param			sort		query		string						false	"Sort field"
 //	@Param			order		query		string						false	"Sort order (asc/desc)"
 //	@Success		200			{object}	models.ProxyListResponse	"List of proxies"
@@ -93,11 +97,16 @@ func (h *ProxyHandler) List(w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("search")
 	status := r.URL.Query().Get("status")
 	protocol := r.URL.Query().Get("protocol")
+	// Invalid country codes (more than 2 chars) match nothing, not a 400.
+	countryCode := strings.ToUpper(r.URL.Query().Get("country_code"))
+	if len(countryCode) > 2 {
+		countryCode = "!" // can never match a stored ISO alpha-2 code
+	}
 	sortField := r.URL.Query().Get("sort")
 	sortOrder := r.URL.Query().Get("order")
 
 	// Get proxies
-	proxies, total, err := h.proxyRepo.List(r.Context(), page, limit, search, status, protocol, sortField, sortOrder)
+	proxies, total, err := h.proxyRepo.List(r.Context(), page, limit, search, status, protocol, countryCode, sortField, sortOrder)
 	if err != nil {
 		h.logger.Error("failed to list proxies", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to list proxies")
@@ -487,6 +496,50 @@ func (h *ProxyHandler) TestIdle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TestBulk enqueues an async health check for the selected proxy IDs and
+// returns the job immediately.
+//
+//	@Summary		Test selected proxies
+//	@Description	Enqueue async health check for the given proxy IDs
+//	@Tags			proxies
+//	@Accept			json
+//	@Produce		json
+//	@Param			request	body		models.BulkTestProxyRequest	true	"Proxy IDs to test"
+//	@Success		202	{object}	map[string]interface{}	"Job accepted"
+//	@Failure		400	{object}	models.ErrorResponse
+//	@Failure		429	{object}	models.ErrorResponse	"Health check queue is full"
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/test/bulk [post]
+func (h *ProxyHandler) TestBulk(w http.ResponseWriter, r *http.Request) {
+	var req models.BulkTestProxyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.ProxyIDs) == 0 {
+		h.errorResponse(w, http.StatusBadRequest, "proxy_ids is required")
+		return
+	}
+
+	// User-initiated: apply each result to the proxy status immediately.
+	job, err := services.RunProxyHealthCheckAsync(r.Context(), h.healthChecker, req.ProxyIDs, req.Workers)
+	if err != nil {
+		if errors.Is(err, services.ErrQueueFull) {
+			h.logger.Warn("failed to enqueue bulk proxy test: queue full")
+			h.errorResponse(w, http.StatusTooManyRequests, "health check queue is full")
+			return
+		}
+		h.logger.Error("failed to start bulk proxy test", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to start bulk proxy test")
+		return
+	}
+	h.jsonResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job_id": job.ID,
+		"status": job.Status,
+		"total":  job.Total,
+	})
+}
+
 // TestJobStatus returns the current status of a proxy test job.
 //
 //	@Summary		Proxy test job status
@@ -558,6 +611,28 @@ func (h *ProxyHandler) ForceCleanup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// CleanupNow runs the dead-proxy cleanup synchronously (manual trigger) and
+// returns the number of deleted proxies.
+//
+//	@Summary		Run proxy cleanup now
+//	@Description	Synchronously delete dead proxies per cleanup settings
+//	@Tags			proxies
+//	@Produce		json
+//	@Success		200	{object}	map[string]interface{}	"Cleanup result"
+//	@Failure		500	{object}	models.ErrorResponse
+//	@Router			/proxies/cleanup/run [post]
+func (h *ProxyHandler) CleanupNow(w http.ResponseWriter, r *http.Request) {
+	deleted, err := h.proxyCleanup.RunNow(r.Context())
+	if err != nil {
+		h.logger.Error("failed to run proxy cleanup", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to run proxy cleanup")
+		return
+	}
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"deleted": deleted,
+	})
+}
+
 // Export handles proxy export
 //
 //	@Summary		Export proxies
@@ -582,7 +657,7 @@ func (h *ProxyHandler) Export(w http.ResponseWriter, r *http.Request) {
 
 	// Get all proxies (capped to bound memory/response size)
 	const exportCap = 10000
-	proxies, total, err := h.proxyRepo.List(r.Context(), 1, exportCap, "", status, "", "created_at", "asc")
+	proxies, total, err := h.proxyRepo.List(r.Context(), 1, exportCap, "", status, "", "", "created_at", "asc")
 	if err != nil {
 		h.logger.Error("failed to get proxies for export", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to export proxies")

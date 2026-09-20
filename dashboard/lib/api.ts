@@ -162,6 +162,7 @@ class ApiClient {
     search?: string
     status?: string
     protocol?: string
+    country_code?: string
     sort?: string
     order?: "asc" | "desc"
   }): Promise<ProxiesResponse> {
@@ -272,6 +273,42 @@ class ApiClient {
 
   async getProxyTestJob(jobId: string): Promise<HCJob> {
     return this.request<HCJob>(`/api/v1/proxies/test/${jobId}`)
+  }
+
+  async startProxyHealthCheck(
+    proxyIds: number[],
+    workers = 20
+  ): Promise<{ job_id: string; status: string; total: number }> {
+    return this.request("/api/v1/proxies/test/bulk", {
+      method: "POST",
+      body: JSON.stringify({ proxy_ids: proxyIds, workers }),
+    })
+  }
+
+  async startGlobalHealthCheck(): Promise<{
+    job_id: string
+    status: string
+    total: number
+  }> {
+    return this.request("/api/v1/proxies/test/global", {
+      method: "POST",
+    })
+  }
+
+  async startIdleOrphanHealthCheck(): Promise<{
+    job_id: string
+    status: string
+    total: number
+  }> {
+    return this.request("/api/v1/proxies/test/idle", {
+      method: "POST",
+    })
+  }
+
+  async runProxyCleanupNow(): Promise<{ deleted: number }> {
+    return this.request("/api/v1/proxies/cleanup/run", {
+      method: "POST",
+    })
   }
 
   // Logs

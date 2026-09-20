@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Suspense } from "react"
-import { ChevronDown, FileText } from "lucide-react"
+import { BrushCleaning, ChevronDown, Coffee, FileText, Globe, Loader2, RotateCw, Zap } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -37,7 +37,7 @@ import { UsageBar } from "@/components/usage-bar"
 import { TagInput } from "@/components/tag-input"
 import { useUrlState } from "@/hooks/use-url-state"
 import { api } from "@/lib/api"
-import { HCJob, Proxy } from "@/lib/types"
+import { GeoSummaryItem, HCJob, Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
 import { count, ms, percent, relative, formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -57,7 +57,7 @@ const SORTS: { value: string; label: string; sort: string; order: "asc" | "desc"
   { value: "status", label: "By status", sort: "status", order: "asc" },
 ]
 
-const URL_DEFAULTS = { page: "1", q: "", status: "", protocol: "", sort: "created_at", order: "desc" }
+const URL_DEFAULTS = { page: "1", q: "", status: "", protocol: "", country: "", sort: "created_at", order: "desc" }
 
 function ProtocolSelect({
   value,
@@ -97,6 +97,10 @@ function ProxiesPage() {
   const [selected, setSelected] = React.useState<Set<number>>(new Set())
   const [allTags, setAllTags] = React.useState<string[]>([])
 
+  // Country filter options (best-effort; hidden when the summary fails to load)
+  const [geoCountries, setGeoCountries] = React.useState<GeoSummaryItem[]>([])
+  const [geoCountriesLoaded, setGeoCountriesLoaded] = React.useState(false)
+
   // Dialogs
   const [addOpen, setAddOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<Proxy | null>(null)
@@ -133,12 +137,18 @@ function ProxiesPage() {
   // so a stale response can't push the page indicator back.
   const fetchSeq = React.useRef(0)
 
-  // Force cleanup of failed proxies
+  // Unified async job state: bulk test, global/idle health check, force
+  // cleanup. One job at a time; while one runs, all actions are disabled.
+  const [jobRunning, setJobRunning] = React.useState(false)
+  const [activeJob, setActiveJob] = React.useState<HCJob | null>(null)
+  const hcPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Force cleanup of failed proxies (confirm dialog)
   const [forceCleanupDialogOpen, setForceCleanupDialogOpen] = React.useState(false)
-  const [forceCleaning, setForceCleaning] = React.useState(false)
-  const [forceCleanupJob, setForceCleanupJob] = React.useState<HCJob | null>(null)
   const [failedCount, setFailedCount] = React.useState<number | null>(null)
-  const forceCleanupPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Synchronous "cleanup now" button state
+  const [cleanupRunning, setCleanupRunning] = React.useState(false)
 
   const fetchProxies = React.useCallback(async () => {
     const seq = ++fetchSeq.current
@@ -150,6 +160,7 @@ function ProxiesPage() {
         search: url.q || undefined,
         status: url.status || undefined,
         protocol: url.protocol || undefined,
+        country_code: url.country || undefined,
         sort: url.sort,
         order,
       })
@@ -167,7 +178,7 @@ function ProxiesPage() {
     } finally {
       if (seq === fetchSeq.current) setIsLoading(false)
     }
-  }, [page, url.q, url.status, url.protocol, url.sort, order, setUrl])
+  }, [page, url.q, url.status, url.protocol, url.country, url.sort, order, setUrl])
 
   React.useEffect(() => {
     fetchProxies()
@@ -188,7 +199,7 @@ function ProxiesPage() {
   // Selection is per page; clear it when the page's rows change.
   React.useEffect(() => {
     setSelected(new Set())
-  }, [page, url.q, url.status, url.protocol, url.sort, order])
+  }, [page, url.q, url.status, url.protocol, url.country, url.sort, order])
 
   const refresh = () => {
     fetchProxies()
@@ -216,6 +227,20 @@ function ProxiesPage() {
     })
 
   // ── Actions ──────────────────────────────────────────────────────────────
+
+  // Country filter options from the geo summary (best-effort, like tag
+  // suggestions: if this fails, the country filter is simply not shown).
+  React.useEffect(() => {
+    api
+      .getGeoByCountry()
+      .then((res) => {
+        setGeoCountries([...res.geo].sort((a, b) => b.total - a.total))
+      })
+      .catch(() => {
+        // Leave the list empty; the filter stays hidden.
+      })
+      .finally(() => setGeoCountriesLoaded(true))
+  }, [])
 
   const handleAddProxy = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -435,17 +460,108 @@ function ProxiesPage() {
   }
   const importDone = importProgress.total > 0 && importProgress.current === importProgress.total
 
-  const hasFilters = !!(url.q || url.status || url.protocol)
+  const hasFilters = !!(url.q || url.status || url.protocol || url.country)
 
-  const stopForceCleanupPoll = React.useCallback(() => {
-    if (forceCleanupPollRef.current) {
-      clearInterval(forceCleanupPollRef.current)
-      forceCleanupPollRef.current = null
+  const stopHcPoll = React.useCallback(() => {
+    if (hcPollRef.current) {
+      clearInterval(hcPollRef.current)
+      hcPollRef.current = null
     }
   }, [])
 
   // Cleanup on unmount
-  React.useEffect(() => () => stopForceCleanupPoll(), [stopForceCleanupPoll])
+  React.useEffect(() => () => stopHcPoll(), [stopHcPoll])
+
+  // Poll a proxy test job until it reaches a terminal status.
+  const startJobPolling = React.useCallback((jobId: string) => {
+    stopHcPoll()
+    hcPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.getProxyTestJob(jobId)
+        setActiveJob(job)
+        if (job.status === "done") {
+          stopHcPoll()
+          setJobRunning(false)
+          setActiveJob(null)
+          if (job.kind === "force_cleanup") {
+            toast.success(`Removed ${job.progress} failed proxies`)
+          } else {
+            toast.success("Health check finished", `${job.active} active, ${job.failed} failed`)
+          }
+          fetchProxies()
+        } else if (job.status === "failed") {
+          stopHcPoll()
+          setJobRunning(false)
+          setActiveJob(null)
+          toast.error(job.error || "Job failed")
+        }
+      } catch {
+        stopHcPoll()
+        setJobRunning(false)
+        setActiveJob(null)
+      }
+    }, 2000)
+  }, [stopHcPoll, fetchProxies])
+
+  const handleGlobalHealthCheck = async () => {
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startGlobalHealthCheck()
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start global health check:", error)
+      setJobRunning(false)
+      toast.error("Failed to start global health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleIdleHealthCheck = async () => {
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startIdleOrphanHealthCheck()
+      if (res.total === 0) {
+        setJobRunning(false)
+        toast.success("Nothing to check", "No idle orphan proxies found")
+        return
+      }
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start idle health check:", error)
+      setJobRunning(false)
+      toast.error("Failed to start idle health check", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleBulkTest = async () => {
+    if (selectedIds.length === 0) return
+    setJobRunning(true)
+    setActiveJob(null)
+    try {
+      const res = await api.startProxyHealthCheck(selectedIds, 20)
+      toast.success(`Health check started (${selectedIds.length} proxies)`)
+      startJobPolling(res.job_id)
+    } catch (error) {
+      console.error("Failed to start bulk proxy test:", error)
+      setJobRunning(false)
+      toast.error("Failed to start bulk test", error instanceof Error ? error.message : "Unknown error")
+    }
+  }
+
+  const handleCleanupNow = async () => {
+    setCleanupRunning(true)
+    try {
+      const res = await api.runProxyCleanupNow()
+      toast.success("Cleanup finished", `${res.deleted} proxies removed`)
+      fetchProxies()
+    } catch (error) {
+      console.error("Failed to run proxy cleanup:", error)
+      toast.error("Failed to run cleanup", error instanceof Error ? error.message : "Unknown error")
+    } finally {
+      setCleanupRunning(false)
+    }
+  }
 
   const handleForceCleanup = async () => {
     try {
@@ -464,42 +580,23 @@ function ProxiesPage() {
 
   const confirmForceCleanup = async () => {
     setForceCleanupDialogOpen(false)
-    setForceCleaning(true)
-    setForceCleanupJob(null)
-    stopForceCleanupPoll()
+    setJobRunning(true)
+    setActiveJob(null)
+    stopHcPoll()
     try {
       const res = await api.startForceCleanup()
       if (res.job_id === null) {
         // Race: the proxies recovered between the count and the start.
         toast.success("Nothing to clean", "No failed proxies found")
-        setForceCleaning(false)
+        setJobRunning(false)
         return
       }
       // already_running: poll the existing job; new job: poll the new one.
-      forceCleanupPollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getProxyTestJob(res.job_id!)
-          setForceCleanupJob(job)
-          if (job.status === "done") {
-            stopForceCleanupPoll()
-            setForceCleaning(false)
-            setForceCleanupJob(null)
-            toast.success(`Removed ${job.progress} failed proxies`)
-            fetchProxies()
-          } else if (job.status === "failed") {
-            stopForceCleanupPoll()
-            setForceCleaning(false)
-            toast.error(job.error || "Force cleanup failed")
-          }
-        } catch {
-          stopForceCleanupPoll()
-          setForceCleaning(false)
-        }
-      }, 1500)
+      startJobPolling(res.job_id)
     } catch (error) {
       console.error("Failed to start force cleanup:", error)
       toast.error("Failed to start force cleanup", error instanceof Error ? error.message : "Unknown error")
-      setForceCleaning(false)
+      setJobRunning(false)
     }
   }
 
@@ -509,11 +606,22 @@ function ProxiesPage() {
         title="Proxies"
         description="Every proxy in the inventory with its last measured health. Filters and sorting are part of the link."
       >
-        <Button variant="outline" onClick={handleReloadProxies} disabled={isReloading}>
+        <Button variant="outline" onClick={handleReloadProxies} disabled={isReloading || jobRunning || cleanupRunning}>
           {isReloading ? "Reloading…" : "Reload rotation pool"}
         </Button>
-        <Button variant="outline" onClick={handleForceCleanup} disabled={isReloading || forceCleaning}>
-          {forceCleaning ? "Force cleaning…" : "Force cleanup"}
+        <Button variant="outline" onClick={handleGlobalHealthCheck} disabled={isReloading || jobRunning || cleanupRunning}>
+          <Globe className="h-4 w-4" aria-hidden /> Global HC
+        </Button>
+        <Button variant="outline" onClick={handleIdleHealthCheck} disabled={isReloading || jobRunning || cleanupRunning}>
+          <Coffee className="h-4 w-4" aria-hidden /> Idle HC
+        </Button>
+        <Button variant="outline" onClick={handleCleanupNow} disabled={isReloading || jobRunning || cleanupRunning}>
+          {cleanupRunning ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RotateCw className="h-4 w-4" aria-hidden />}
+          {cleanupRunning ? "Cleaning…" : "Cleanup now"}
+        </Button>
+        <Button variant="outline" onClick={handleForceCleanup} disabled={isReloading || jobRunning || cleanupRunning}>
+          {jobRunning && activeJob?.kind === "force_cleanup" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <BrushCleaning className="h-4 w-4" aria-hidden />}
+          Force cleanup
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -555,6 +663,14 @@ function ProxiesPage() {
           onChange={(protocol) => setFilter({ protocol })}
           options={[{ value: "", label: "All protocols" }, ...PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))]}
         />
+        {geoCountriesLoaded && geoCountries.length > 0 && (
+          <NativeSelect
+            aria-label="Country"
+            value={url.country}
+            onChange={(country) => setFilter({ country })}
+            options={[{ value: "", label: "All countries" }, ...geoCountries.map((c) => ({ value: c.country_code, label: `${c.country_name} (${c.total})` }))]}
+          />
+        )}
         <NativeSelect
           aria-label="Sort"
           value={sortValue}
@@ -568,7 +684,7 @@ function ProxiesPage() {
           <button
             type="button"
             className="text-muted-foreground hover:text-foreground ml-1 font-medium"
-            onClick={() => setFilter({ q: "", status: "", protocol: "" })}
+            onClick={() => setFilter({ q: "", status: "", protocol: "", country: "" })}
           >
             Clear
           </button>
@@ -577,6 +693,9 @@ function ProxiesPage() {
         {selectedIds.length > 0 && (
           <div className="ml-auto flex items-center gap-2">
             <span className="num text-muted-foreground">{selectedIds.length} selected</span>
+            <Button variant="outline" size="sm" onClick={handleBulkTest} disabled={jobRunning || cleanupRunning}>
+              <Zap className="h-4 w-4" aria-hidden /> Test selected
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setTagOpen(true)}>
               Edit tags
             </Button>
@@ -587,12 +706,16 @@ function ProxiesPage() {
         )}
       </div>
 
-      {forceCleaning && forceCleanupJob && (
+      {jobRunning && activeJob && (
         <div className="border-border flex items-center gap-3 border-b px-4 py-2 md:px-6">
           <span className="text-muted-foreground text-xs">
-            Force cleaning up failed proxies — {count(forceCleanupJob.progress)} / {count(forceCleanupJob.total)}
+            {activeJob.kind === "force_cleanup"
+              ? `Force cleaning up failed proxies — ${count(activeJob.progress)} / ${count(activeJob.total)}`
+              : `Health checking proxies — ${count(activeJob.progress)} / ${count(activeJob.total)}`}
+            {activeJob.active + activeJob.failed > 0 &&
+              ` · ${count(activeJob.active)} active, ${count(activeJob.failed)} failed`}
           </span>
-          <UsageBar value={forceCleanupJob.total > 0 ? (forceCleanupJob.progress / forceCleanupJob.total) * 100 : 0} className="w-40" />
+          <UsageBar value={activeJob.total > 0 ? (activeJob.progress / activeJob.total) * 100 : 0} className="w-40" />
         </div>
       )}
 
@@ -613,13 +736,14 @@ function ProxiesPage() {
                   />
                 </TableHead>
                 <SortHeader field="address" sort={url.sort} order={order} onSort={onSort}>Address</SortHeader>
+                <TableHead>Country</TableHead>
                 <TableHead>Protocol</TableHead>
                 <TableHead>Tags</TableHead>
                 <SortHeader field="status" sort={url.sort} order={order} onSort={onSort}>Status</SortHeader>
                 <SortHeader field="requests" sort={url.sort} order={order} onSort={onSort} align="right">Requests</SortHeader>
                 <TableHead className="text-right">Success</TableHead>
                 <SortHeader field="avg_response_time" sort={url.sort} order={order} onSort={onSort} align="right">Avg response</SortHeader>
-                <TableHead>Last check</TableHead>
+                <SortHeader field="last_check" sort={url.sort} order={order} onSort={onSort}>Last check</SortHeader>
                 <TableHead className="w-8" />
               </TableRow>
             </TableHeader>
@@ -635,6 +759,27 @@ function ProxiesPage() {
                     <TableCell className="font-mono">
                       {proxy.address}
                       {proxy.username && <span className="text-muted-foreground ml-2 text-[0.6875rem]">auth</span>}
+                    </TableCell>
+                    <TableCell>
+                      {proxy.country_code ? (
+                        <span
+                          className="flex items-center gap-1.5"
+                          title={[proxy.country_name, proxy.region_name, proxy.city_name, proxy.isp].filter(Boolean).join(", ") || undefined}
+                        >
+                          <img
+                            src={`https://flagcdn.com/${proxy.country_code.toLowerCase()}.svg`}
+                            alt=""
+                            className="h-3 w-4 rounded-sm"
+                            // CDN is not a hard dependency: on load failure just keep the code.
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = "none"
+                            }}
+                          />
+                          {proxy.country_code}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-muted-foreground font-mono">{proxy.protocol}</TableCell>
                     <TableCell>

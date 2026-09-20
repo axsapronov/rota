@@ -69,6 +69,12 @@ type idleOrphanCheckerWithProgress interface {
 	CheckOrphanIdleProxiesWithProgress(ctx context.Context, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
 }
 
+// proxyIDsCheckerWithProgress matches HealthChecker.CheckProxiesWithProgress
+// (user-initiated bulk health check of selected proxies).
+type proxyIDsCheckerWithProgress interface {
+	CheckProxiesWithProgress(ctx context.Context, proxyIDs []int, onProgress func(checked, active, failed int), immediate bool) ([]models.ProxyTestResult, error)
+}
+
 // HCJob holds state for one async health-check run
 type HCJob struct {
 	ID         string      `json:"id"`
@@ -575,6 +581,58 @@ func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWith
 	}
 	store.Update(job.ID, func(j *HCJob) {
 		j.Total = total
+	})
+	return job, nil
+}
+
+// RunProxyHealthCheckAsync enqueues a health check for the given proxy IDs
+// (user-initiated bulk "test selected") and returns the job immediately.
+func RunProxyHealthCheckAsync(
+	ctx context.Context,
+	hc proxyIDsCheckerWithProgress,
+	proxyIDs []int,
+	workers int,
+) (*HCJob, error) {
+	store := GetJobStore()
+	if workers <= 0 {
+		workers = 20
+	}
+
+	job, err := store.Create(HCJobKindProxy, 0, "Selected proxies", "", workers, proxyIDs, func(store *HCJobStore, job *HCJob) {
+		results, runErr := hc.CheckProxiesWithProgress(context.Background(), job.ProxyIDs, func(checked, active, failed int) {
+			store.Update(job.ID, func(j *HCJob) {
+				j.Progress = checked
+				j.Active = active
+				j.Failed = failed
+			})
+		}, true)
+		if runErr != nil {
+			store.finishFailed(job.ID, runErr)
+			return
+		}
+		active := 0
+		failed := 0
+		for _, r := range results {
+			if r.Status == "active" {
+				active++
+			} else {
+				failed++
+			}
+		}
+		store.Update(job.ID, func(j *HCJob) {
+			j.Total = len(results)
+			j.Progress = len(results)
+			j.Active = active
+			j.Failed = failed
+			j.Results = results
+		})
+		store.finishDone(job.ID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	store.Update(job.ID, func(j *HCJob) {
+		j.Total = len(proxyIDs)
 	})
 	return job, nil
 }

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/checkstats"
@@ -110,6 +111,38 @@ func (s *ProxyCleanupService) run(ctx context.Context) {
 		s.log.Info("proxy cleanup: removed dead proxies", "count", deleted)
 	}
 	record(checkstats.CleanupStatusOK, deleted, nil)
+}
+
+// RunNow performs one manual cleanup run using the configured thresholds,
+// ignoring the Enabled flag (the caller explicitly asked for it). Returns the
+// number of deleted proxies.
+func (s *ProxyCleanupService) RunNow(ctx context.Context) (int, error) {
+	cfg, err := s.loadSettings(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load proxy cleanup settings: %w", err)
+	}
+
+	startedAt := time.Now()
+	deleted, err := s.proxyRepo.DeleteDeadProxies(ctx, cfg.MaxFailedDays, cfg.MinSuccessRate)
+	if err != nil {
+		s.log.Error("proxy cleanup (manual): delete failed", "error", err)
+		return 0, err
+	}
+
+	now := time.Now()
+	checkstats.RecordProxyCleanup(checkstats.ProxyCleanupSnapshot{
+		Enabled:        cfg.Enabled,
+		LastRunAt:      &now,
+		LastStatus:     checkstats.CleanupStatusOK,
+		LastDurationMs: now.Sub(startedAt).Milliseconds(),
+		DeletedProxies: deleted,
+		MaxFailedDays:  cfg.MaxFailedDays,
+		MinSuccessRate: cfg.MinSuccessRate,
+	})
+	if deleted > 0 {
+		s.log.Info("proxy cleanup (manual): removed dead proxies", "count", deleted)
+	}
+	return deleted, nil
 }
 
 func (s *ProxyCleanupService) loadSettings(ctx context.Context) (models.ProxyCleanupSettings, error) {
