@@ -611,6 +611,27 @@ func (s *HCJobStore) FindActiveByKind(kind HCJobKind) (*HCJob, bool) {
 	return best, best != nil
 }
 
+// FindActivePoolJob returns the most recent pending/running pool job for
+// poolID, for the pool sweep guard: a repeat trigger for the same pool
+// returns the existing job instead of queueing a duplicate sweep.
+func (s *HCJobStore) FindActivePoolJob(poolID int) (*HCJob, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *HCJob
+	for _, j := range s.jobs {
+		if j.Kind != HCJobKindPool || j.PoolID != poolID {
+			continue
+		}
+		if j.Status != HCJobPending && j.Status != HCJobRunning {
+			continue
+		}
+		if best == nil || j.StartedAt.After(best.StartedAt) {
+			best = j
+		}
+	}
+	return best, best != nil
+}
+
 // consume pulls job ids off the priority queue and runs them, taking only
 // items of this consumer's class. A panic in the consumer itself is recovered
 // (logged) so the runConsumerLoop restart path takes over.
@@ -687,6 +708,11 @@ func RunPoolHealthCheckAsync(
 	workers int,
 ) (*HCJob, error) {
 	store := GetJobStore()
+	// Pool sweep guard: a repeat trigger for the same pool returns the
+	// existing pending/running job instead of queueing a duplicate sweep.
+	if existing, ok := store.FindActivePoolJob(poolID); ok {
+		return existing, nil
+	}
 	if poolName == "" {
 		poolName = fmt.Sprintf("Pool #%d", poolID)
 	}
@@ -738,6 +764,12 @@ func RunPoolHealthCheckAsync(
 // accounting (periodic scheduler).
 func RunOrphanHealthCheckAsync(ctx context.Context, hc orphanChecker, immediate bool) (*HCJob, error) {
 	store := GetJobStore()
+	// Orphan sweep guard: at most one orphan sweep in flight — a repeat
+	// trigger (manual API call or scheduler tick) returns the existing
+	// pending/running job instead of queueing a duplicate.
+	if existing, ok := store.FindActiveByKind(HCJobKindOrphan); ok {
+		return existing, nil
+	}
 	total := 0
 	if counter, ok := hc.(orphanCounter); ok {
 		if count, err := counter.CountOrphanProxies(ctx); err == nil {
@@ -796,6 +828,10 @@ func RunOrphanHealthCheckAsync(ctx context.Context, hc orphanChecker, immediate 
 // status idle. immediate follows the same semantics as RunOrphanHealthCheckAsync.
 func RunIdleOrphanHealthCheckAsync(ctx context.Context, hc idleOrphanCheckerWithProgress, immediate bool) (*HCJob, error) {
 	store := GetJobStore()
+	// Idle sweep guard: same single-in-flight rule as the orphan sweep.
+	if existing, ok := store.FindActiveByKind(HCJobKindIdle); ok {
+		return existing, nil
+	}
 	total := 0
 	if counter, ok := hc.(idleOrphanCounter); ok {
 		if count, err := counter.CountOrphanIdleProxies(ctx); err == nil {

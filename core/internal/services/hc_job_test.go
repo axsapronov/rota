@@ -438,6 +438,158 @@ func TestHCJobStore_queuePending(t *testing.T) {
 	}
 }
 
+func TestHCJobStore_FindActivePoolJob(t *testing.T) {
+	store := newHCJobStore(8)
+	now := time.Now()
+
+	store.mu.Lock()
+	store.jobs["done"] = &HCJob{ID: "done", Kind: HCJobKindPool, PoolID: 7, Status: HCJobDone, StartedAt: now.Add(3 * time.Minute)}
+	store.jobs["running"] = &HCJob{ID: "running", Kind: HCJobKindPool, PoolID: 7, Status: HCJobRunning, StartedAt: now}
+	store.jobs["other-pool"] = &HCJob{ID: "other-pool", Kind: HCJobKindPool, PoolID: 8, Status: HCJobRunning, StartedAt: now.Add(4 * time.Minute)}
+	store.mu.Unlock()
+
+	if j, ok := store.FindActivePoolJob(7); !ok || j.ID != "running" {
+		t.Fatalf("FindActivePoolJob(7) = (%v, %v), want the running job", j, ok)
+	}
+
+	// A newer pending job for the same pool takes precedence.
+	store.mu.Lock()
+	store.jobs["pending"] = &HCJob{ID: "pending", Kind: HCJobKindPool, PoolID: 7, Status: HCJobPending, StartedAt: now.Add(5 * time.Minute)}
+	store.mu.Unlock()
+
+	if j, ok := store.FindActivePoolJob(7); !ok || j.ID != "pending" {
+		t.Fatalf("FindActivePoolJob(7) = (%v, %v), want the newest pending job", j, ok)
+	}
+
+	// A running job for a different pool is returned for that pool.
+	if j, ok := store.FindActivePoolJob(8); !ok || j.ID != "other-pool" {
+		t.Fatalf("FindActivePoolJob(8) = (%v, %v), want the other pool's job", j, ok)
+	}
+
+	// No active job for pool 9.
+	if _, ok := store.FindActivePoolJob(9); ok {
+		t.Fatal("FindActivePoolJob(9) found a job, want none")
+	}
+}
+
+// fakeOrphanChecker is a scripted orphanChecker for unit tests.
+type fakeOrphanChecker struct {
+	calls atomic.Int32
+}
+
+func (f *fakeOrphanChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error) {
+	f.calls.Add(1)
+	return nil, nil
+}
+
+// fakeIdleChecker is a scripted idleOrphanCheckerWithProgress for unit tests.
+type fakeIdleChecker struct {
+	calls atomic.Int32
+}
+
+func (f *fakeIdleChecker) CheckOrphanIdleProxiesWithProgress(
+	ctx context.Context,
+	onProgress func(checked, active, failed int),
+	immediate bool,
+	jobID string,
+) ([]models.ProxyTestResult, error) {
+	f.calls.Add(1)
+	return nil, nil
+}
+
+// TestRunPoolHealthCheckAsync_Dedup verifies the pool sweep guard: with an
+// in-flight pool job, a repeat trigger for the same pool returns it instead
+// of queueing a duplicate sweep.
+func TestRunPoolHealthCheckAsync_Dedup(t *testing.T) {
+	ensureGlobalJobStoreQueue(t)
+	store := GetJobStore()
+
+	store.mu.Lock()
+	store.jobs["existing-pool"] = &HCJob{ID: "existing-pool", Kind: HCJobKindPool, PoolID: 7,
+		PoolName: "p7", Status: HCJobRunning, StartedAt: time.Now()}
+	store.mu.Unlock()
+	t.Cleanup(func() {
+		store.Update("existing-pool", func(j *HCJob) { j.Status = HCJobDone })
+	})
+
+	job, err := RunPoolHealthCheckAsync(context.Background(), nil, 7, "p7", "", 0)
+	if err != nil {
+		t.Fatalf("RunPoolHealthCheckAsync: %v", err)
+	}
+	if job.ID != "existing-pool" {
+		t.Fatalf("job = %s, want the existing job (no duplicate queued)", job.ID)
+	}
+	if jobs := store.ListByPool(7); len(jobs) != 1 {
+		t.Fatalf("pool 7 jobs = %d, want 1", len(jobs))
+	}
+}
+
+// TestRunOrphanHealthCheckAsync_Dedup verifies the orphan sweep guard: a
+// repeat trigger returns the in-flight orphan job instead of queueing a
+// duplicate sweep.
+func TestRunOrphanHealthCheckAsync_Dedup(t *testing.T) {
+	ensureGlobalJobStoreQueue(t)
+	store := GetJobStore()
+	fake := &fakeOrphanChecker{}
+
+	first, err := RunOrphanHealthCheckAsync(context.Background(), fake, true)
+	if err != nil {
+		t.Fatalf("first RunOrphanHealthCheckAsync: %v", err)
+	}
+	second, err := RunOrphanHealthCheckAsync(context.Background(), fake, true)
+	if err != nil {
+		t.Fatalf("second RunOrphanHealthCheckAsync: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("second trigger returned job %s, want the in-flight job %s", second.ID, first.ID)
+	}
+	active := 0
+	for _, j := range store.ListByKind(HCJobKindOrphan) {
+		if j.Status == HCJobPending || j.Status == HCJobRunning {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active orphan jobs = %d, want 1 (no duplicate queued)", active)
+	}
+	t.Cleanup(func() {
+		store.Update(first.ID, func(j *HCJob) { j.Status = HCJobDone })
+	})
+}
+
+// TestRunIdleOrphanHealthCheckAsync_Dedup verifies the idle sweep guard: a
+// repeat trigger returns the in-flight idle job instead of queueing a
+// duplicate sweep.
+func TestRunIdleOrphanHealthCheckAsync_Dedup(t *testing.T) {
+	ensureGlobalJobStoreQueue(t)
+	store := GetJobStore()
+	fake := &fakeIdleChecker{}
+
+	first, err := RunIdleOrphanHealthCheckAsync(context.Background(), fake, true)
+	if err != nil {
+		t.Fatalf("first RunIdleOrphanHealthCheckAsync: %v", err)
+	}
+	second, err := RunIdleOrphanHealthCheckAsync(context.Background(), fake, true)
+	if err != nil {
+		t.Fatalf("second RunIdleOrphanHealthCheckAsync: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("second trigger returned job %s, want the in-flight job %s", second.ID, first.ID)
+	}
+	active := 0
+	for _, j := range store.ListByKind(HCJobKindIdle) {
+		if j.Status == HCJobPending || j.Status == HCJobRunning {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active idle jobs = %d, want 1 (no duplicate queued)", active)
+	}
+	t.Cleanup(func() {
+		store.Update(first.ID, func(j *HCJob) { j.Status = HCJobDone })
+	})
+}
+
 // fakeProxyIDsChecker is a scripted proxyIDsCheckerWithProgress for unit tests.
 type fakeProxyIDsChecker struct {
 	results []models.ProxyTestResult
