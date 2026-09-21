@@ -126,6 +126,10 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// the health checker (kind=pool), so a pool sweep no longer writes one
 	// UPDATE per proxy.
 	poolSvc.SetHealthCheckResultWriter(healthChecker.ResultWriter())
+	// Apply the global health-check body-validation strategy to pool sweeps
+	// too, so a proxy answering 200 with junk (HTML captive-portal pages) is
+	// not kept "active" by the single source of truth.
+	poolSvc.SetHealthCheckBodyStrategy(healthChecker.BodyStrategy)
 	forceCleanupSvc := services.NewForceCleanupService(proxyRepo, log)
 	// Created here (before the handlers) so the proxy handler can offer a
 	// manual "cleanup now"; the background loop is started below.

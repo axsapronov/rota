@@ -145,6 +145,8 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"url":                "https://api.ipify.org",
 			"status":             200,
 			"headers":            []string{"User-Agent: Rota-HealthCheck/1.0"},
+			"strategy":           models.StrategyIP,
+			"strategy_value":     "",
 			"orphan_ttl_minutes": models.DefaultOrphanTTLMinutes,
 			"idle_ttl_minutes":   models.DefaultIdleTTLMinutes,
 		},
@@ -204,6 +206,22 @@ func (r *SettingsRepository) mapToSettings(m map[string]map[string]any) (*models
 		if hc, ok := m["healthcheck"]; !ok || hc["idle_ttl_minutes"] == nil {
 			settings.HealthCheck.IdleTTLMinutes = models.DefaultIdleTTLMinutes
 		}
+	}
+
+	// Health-check body strategy: rows saved before the body_pattern →
+	// strategy change carry the legacy body_pattern key; carry it over as a
+	// regex strategy so saved patterns keep working. A missing/empty strategy
+	// resolves to the built-in IP check.
+	if settings.HealthCheck.Strategy == "" {
+		if hc, ok := m["healthcheck"]; ok {
+			if pattern, ok := hc["body_pattern"].(string); ok && pattern != "" {
+				settings.HealthCheck.Strategy = models.StrategyRegex
+				settings.HealthCheck.StrategyValue = pattern
+			}
+		}
+	}
+	if settings.HealthCheck.Strategy == "" {
+		settings.HealthCheck.Strategy = models.StrategyIP
 	}
 
 	return settings, nil

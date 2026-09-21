@@ -58,12 +58,29 @@ type HealthCheckSettings struct {
 	Status    int      `json:"status"`
 	Headers   []string `json:"headers"`
 	StrictTLS bool     `json:"strict_tls"` // Enable real TLS certificate validation during health checks
+	// Strategy selects how the health-check response body is validated after
+	// the status-code check (see Strategy* constants). Empty normalizes to
+	// StrategyIP when settings are loaded, so the default is "body must
+	// contain an IP" — catches proxies that answer the check URL with a valid
+	// status code but junk body (captive-portal HTML, login pages).
+	Strategy string `json:"strategy"`
+	// StrategyValue is the value for the StrategyContains / StrategyRegex
+	// strategies (substring / Go regex); unused by the other strategies.
+	StrategyValue string `json:"strategy_value"`
 	// OrphanTTLMinutes excludes orphan proxies checked more recently than
 	// now()-TTL from periodic orphan sweeps (0 disables the filter).
 	OrphanTTLMinutes int `json:"orphan_ttl_minutes"`
 	// IdleTTLMinutes is the same TTL filter for idle-orphan sweeps.
 	IdleTTLMinutes int `json:"idle_ttl_minutes"`
 }
+
+// Health-check body-validation strategies (HealthCheckSettings.Strategy).
+const (
+	StrategyStatus   = "status"   // status code only, no body validation
+	StrategyIP       = "ip"       // body must contain an IPv4/IPv6 address (default)
+	StrategyContains = "contains" // body must contain StrategyValue as a substring
+	StrategyRegex    = "regex"    // body must match the Go regex in StrategyValue
+)
 
 // Default health-check TTLs (minutes). Conservative: 6h for orphan sweeps,
 // 24h for idle sweeps. 0 explicitly disables the TTL filter.

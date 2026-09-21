@@ -373,7 +373,7 @@ const docTemplate = `{
         },
         "/metrics/system": {
             "get": {
-                "description": "Get current system resource metrics (CPU, memory, disk, runtime)",
+                "description": "Get current system resource metrics (CPU, memory, disk, runtime) plus optional background-pipeline sections (health_check, global_health_check, geo, cleanup)",
                 "produces": [
                     "application/json"
                 ],
@@ -1218,6 +1218,53 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "checkstats.CleanupMetrics": {
+            "type": "object",
+            "properties": {
+                "force": {
+                    "$ref": "#/definitions/checkstats.ForceCleanupSnapshot"
+                },
+                "log": {
+                    "$ref": "#/definitions/checkstats.LogCleanupSnapshot"
+                },
+                "proxy": {
+                    "$ref": "#/definitions/checkstats.ProxyCleanupSnapshot"
+                }
+            }
+        },
+        "checkstats.CleanupStatus": {
+            "type": "string",
+            "enum": [
+                "idle",
+                "ok",
+                "error"
+            ],
+            "x-enum-varnames": [
+                "CleanupStatusIdle",
+                "CleanupStatusOK",
+                "CleanupStatusError"
+            ]
+        },
+        "checkstats.ForceCleanupSnapshot": {
+            "type": "object",
+            "properties": {
+                "deleted_proxies": {
+                    "type": "integer"
+                },
+                "last_duration_ms": {
+                    "type": "integer"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_run_at": {
+                    "type": "string"
+                },
+                "last_status": {
+                    "$ref": "#/definitions/checkstats.CleanupStatus"
+                }
+            }
+        },
         "checkstats.GlobalHealthCheckSnapshot": {
             "type": "object",
             "properties": {
@@ -1266,6 +1313,70 @@ const docTemplate = `{
                 "GlobalHealthCheckStatusError"
             ]
         },
+        "checkstats.LogCleanupSnapshot": {
+            "type": "object",
+            "properties": {
+                "compression_after_days": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "last_duration_ms": {
+                    "type": "integer"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_run_at": {
+                    "type": "string"
+                },
+                "last_status": {
+                    "$ref": "#/definitions/checkstats.CleanupStatus"
+                },
+                "next_run_at": {
+                    "type": "string"
+                },
+                "retention_days": {
+                    "type": "integer"
+                }
+            }
+        },
+        "checkstats.ProxyCleanupSnapshot": {
+            "type": "object",
+            "properties": {
+                "cleanup_interval_hours": {
+                    "type": "integer"
+                },
+                "deleted_proxies": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "last_duration_ms": {
+                    "type": "integer"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_run_at": {
+                    "type": "string"
+                },
+                "last_status": {
+                    "$ref": "#/definitions/checkstats.CleanupStatus"
+                },
+                "max_failed_days": {
+                    "type": "integer"
+                },
+                "min_success_rate": {
+                    "type": "number"
+                },
+                "next_run_at": {
+                    "type": "string"
+                }
+            }
+        },
         "checkstats.Snapshot": {
             "type": "object",
             "properties": {
@@ -1311,6 +1422,32 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.GeoMetrics": {
+            "type": "object",
+            "properties": {
+                "batch_requests_last_minute": {
+                    "type": "integer"
+                },
+                "batch_requests_limit": {
+                    "type": "integer"
+                },
+                "ips_updated_last_10m": {
+                    "type": "integer"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "queue_pending": {
+                    "type": "integer"
+                },
+                "queued_in_memory": {
+                    "type": "integer"
+                },
+                "usage_percent_1m": {
+                    "type": "number"
+                }
+            }
+        },
         "handlers.MemoryMetrics": {
             "type": "object",
             "properties": {
@@ -1351,11 +1488,17 @@ const docTemplate = `{
         "handlers.SystemMetrics": {
             "type": "object",
             "properties": {
+                "cleanup": {
+                    "$ref": "#/definitions/checkstats.CleanupMetrics"
+                },
                 "cpu": {
                     "$ref": "#/definitions/handlers.CPUMetrics"
                 },
                 "disk": {
                     "$ref": "#/definitions/handlers.DiskMetrics"
+                },
+                "geo": {
+                    "$ref": "#/definitions/handlers.GeoMetrics"
                 },
                 "global_health_check": {
                     "$ref": "#/definitions/checkstats.GlobalHealthCheckSnapshot"
@@ -1608,11 +1751,19 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "orphan_ttl_minutes": {
-                    "description": "OrphanTTLMinutes excludes orphan proxies checked more recently than now()-TTL from periodic orphan sweeps (0 disables the filter).",
+                    "description": "OrphanTTLMinutes excludes orphan proxies checked more recently than\nnow()-TTL from periodic orphan sweeps (0 disables the filter).",
                     "type": "integer"
                 },
                 "status": {
                     "type": "integer"
+                },
+                "strategy": {
+                    "description": "Strategy selects how the health-check response body is validated after\nthe status-code check (see Strategy* constants). Empty normalizes to\nStrategyIP when settings are loaded, so the default is \"body must\ncontain an IP\" — catches proxies that answer the check URL with a valid\nstatus code but junk body (captive-portal HTML, login pages).",
+                    "type": "string"
+                },
+                "strategy_value": {
+                    "description": "StrategyValue is the value for the StrategyContains / StrategyRegex\nstrategies (substring / Go regex); unused by the other strategies.",
+                    "type": "string"
                 },
                 "strict_tls": {
                     "description": "Enable real TLS certificate validation during health checks",

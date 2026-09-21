@@ -58,6 +58,18 @@ func (h *HealthChecker) setSettings(settings *models.HealthCheckSettings) {
 	h.settings = settings
 }
 
+// BodyStrategy returns the configured health-check body-validation strategy
+// from the cached settings (empty strategy normalizes to the built-in IP
+// check). Safe for concurrent use; used by pool sweeps to apply the same
+// body validation as CheckProxy.
+func (h *HealthChecker) BodyStrategy() BodyStrategy {
+	settings := h.getSettings()
+	if settings == nil {
+		return BodyStrategy{Strategy: models.StrategyIP}
+	}
+	return BodyStrategy{Strategy: settings.Strategy, Value: settings.StrategyValue}.Normalize()
+}
+
 // loadSettings reads the health-check settings from the repository and caches
 // them under the lock (AUD-8).
 func (h *HealthChecker) loadSettings(ctx context.Context) (*models.HealthCheckSettings, error) {
@@ -365,6 +377,29 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, proxy *models.Proxy, imm
 		h.persistCheckResult(ctx, proxy.ID, false, errMsg, duration, immediate)
 
 		return result, nil
+	}
+
+	// Validate the response body per the configured strategy: catches proxies
+	// that answer the check URL with a valid status code but junk
+	// (captive-portal HTML, login pages, error bodies) instead of the
+	// expected payload. The status strategy skips body reading entirely.
+	bodyStrategy := BodyStrategy{Strategy: settings.Strategy, Value: settings.StrategyValue}.Normalize()
+	if bodyStrategy.Strategy != models.StrategyStatus {
+		body, err := ReadHCBody(resp.Body)
+		if err != nil {
+			result.Status = "failed"
+			errMsg := fmt.Sprintf("failed to read response body: %v", err)
+			result.Error = &errMsg
+			h.persistCheckResult(ctx, proxy.ID, false, errMsg, int(time.Since(startTime).Milliseconds()), immediate)
+			return result, nil
+		}
+		if err := bodyStrategy.Validate(body); err != nil {
+			result.Status = "failed"
+			errMsg := err.Error()
+			result.Error = &errMsg
+			h.persistCheckResult(ctx, proxy.ID, false, errMsg, int(time.Since(startTime).Milliseconds()), immediate)
+			return result, nil
+		}
 	}
 
 	// Success!

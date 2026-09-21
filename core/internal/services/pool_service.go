@@ -28,6 +28,11 @@ type PoolService struct {
 	proxyRepo *repository.ProxyRepository
 	logger    *logger.Logger
 	hcResults hcResultRecorder
+	// hcBodyStrategy returns the global health-check body-validation strategy
+	// (normalized; empty → built-in IP check) so pool sweeps apply the same
+	// body validation as HealthChecker.CheckProxy. Nil disables the check
+	// (tests / legacy wiring).
+	hcBodyStrategy func() proxy.BodyStrategy
 
 	// per-pool rotation state (roundrobin index, stick counters)
 	mu          sync.Mutex
@@ -42,6 +47,21 @@ type PoolService struct {
 // (legacy behavior, kept for tests).
 func (ps *PoolService) SetHealthCheckResultWriter(w hcResultRecorder) {
 	ps.hcResults = w
+}
+
+// SetHealthCheckBodyStrategy wires the global body-validation strategy
+// provider into pool sweeps. The provider is called per check, so strategy
+// changes in settings take effect on the next sweep without a restart.
+func (ps *PoolService) SetHealthCheckBodyStrategy(fn func() proxy.BodyStrategy) {
+	ps.hcBodyStrategy = fn
+}
+
+// bodyStrategy returns the current global body-validation strategy.
+func (ps *PoolService) bodyStrategy() proxy.BodyStrategy {
+	if ps.hcBodyStrategy == nil {
+		return proxy.BodyStrategy{}
+	}
+	return ps.hcBodyStrategy()
 }
 
 // NewPoolService creates a new PoolService
@@ -359,6 +379,27 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		// Validate the response body per the global strategy: catches proxies
+		// that answer with a valid status code but junk (HTML captive-portal
+		// pages, login screens) instead of the expected payload. The status
+		// strategy skips body reading entirely.
+		if bs := ps.bodyStrategy().Normalize(); bs.Strategy != models.StrategyStatus {
+			body, err := proxy.ReadHCBody(resp.Body)
+			if err != nil {
+				result.Status = "failed"
+				msg := fmt.Sprintf("failed to read response body: %v", err)
+				result.Error = &msg
+				ps.recordPoolResult(ctx, p.ID, false, msg)
+				return result
+			}
+			if err := bs.Validate(body); err != nil {
+				result.Status = "failed"
+				msg := err.Error()
+				result.Error = &msg
+				ps.recordPoolResult(ctx, p.ID, false, msg)
+				return result
+			}
+		}
 		result.Status = "active"
 		result.ResponseTime = &dur
 		ps.recordPoolResult(ctx, p.ID, true, "")

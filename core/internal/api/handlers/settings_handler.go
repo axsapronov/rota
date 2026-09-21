@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
@@ -236,6 +237,30 @@ func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 	// Validate healthcheck workers
 	if s.HealthCheck.Workers < 1 || s.HealthCheck.Workers > 100 {
 		return fmt.Errorf("healthcheck.workers must be between 1 and 100")
+	}
+
+	// Validate healthcheck body-validation strategy. An empty value is
+	// accepted: it normalizes to the built-in IP strategy when loaded.
+	strategyValid := s.HealthCheck.Strategy == "" || proxy.BodyStrategy{Strategy: s.HealthCheck.Strategy}.Valid()
+	if !strategyValid {
+		return fmt.Errorf("healthcheck.strategy must be one of %q, %q, %q, %q",
+			models.StrategyStatus, models.StrategyIP, models.StrategyContains, models.StrategyRegex)
+	}
+	switch s.HealthCheck.Strategy {
+	case models.StrategyContains:
+		if s.HealthCheck.StrategyValue == "" {
+			return fmt.Errorf("healthcheck.strategy_value is required for the %q strategy", models.StrategyContains)
+		}
+		if len(s.HealthCheck.StrategyValue) > 256 {
+			return fmt.Errorf("healthcheck.strategy_value must be at most 256 characters")
+		}
+	case models.StrategyRegex:
+		if s.HealthCheck.StrategyValue == "" {
+			return fmt.Errorf("healthcheck.strategy_value is required for the %q strategy", models.StrategyRegex)
+		}
+		if _, err := proxy.CompileBodyPattern(s.HealthCheck.StrategyValue); err != nil {
+			return fmt.Errorf("healthcheck.strategy_value is not a valid regular expression: %v", err)
+		}
 	}
 
 	// Validate global (orphan) health check interval

@@ -130,8 +130,91 @@ func TestHealthCheckStrictTLS(t *testing.T) {
 				URL:       ts.URL,
 				Status:    http.StatusOK,
 				StrictTLS: tc.strict,
+				Strategy:  models.StrategyStatus, // test target answers with an empty body
 			})
 
+			result, err := h.CheckProxy(context.Background(), &models.Proxy{
+				ID:       1,
+				Address:  proxyAddr,
+				Protocol: "http",
+			}, false)
+			if err != nil {
+				t.Fatalf("CheckProxy: %v", err)
+			}
+			if result.Status != tc.want {
+				t.Fatalf("status = %q, want %q (error: %v)", result.Status, tc.want, result.Error)
+			}
+			if tc.wantErr != "" {
+				if result.Error == nil || !strings.Contains(*result.Error, tc.wantErr) {
+					errStr := "nil"
+					if result.Error != nil {
+						errStr = *result.Error
+					}
+					t.Fatalf("error = %q, want it to contain %q", errStr, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+// TestCheckProxyBodyStrategy verifies the body-validation strategies: with
+// the default "ip" strategy a proxy answering the check URL with a valid
+// status code but junk (an HTML captive-portal page) is marked failed, while
+// the expected payload (a plain IP) passes. The "status" strategy keeps the
+// legacy status-code-only behavior; an empty strategy normalizes to "ip".
+func TestCheckProxyBodyStrategy(t *testing.T) {
+	// TLS targets: the tunnel proxy tunnels CONNECT (https) end-to-end.
+	ipServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("93.184.216.34"))
+	}))
+	defer ipServer.Close()
+
+	htmlServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<!DOCTYPE html><html><head><title>Login</title></head><body><form>Invalid username or password</form></body></html>"))
+	}))
+	defer htmlServer.Close()
+
+	pool, err := pgxpool.New(context.Background(), "postgres://dead:dead@127.0.0.1:1/dead")
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	h := &HealthChecker{
+		tracker: NewUsageTracker(repository.NewProxyRepository(&database.DB{Pool: pool})),
+		results: NewResultWriter(repository.NewProxyRepository(&database.DB{Pool: pool}), logger.New("error")),
+		logger:  logger.New("error"),
+	}
+	proxyAddr := newTunnelProxy(t)
+
+	ipPattern := `^\d{1,3}(\.\d{1,3}){3}$`
+
+	tests := []struct {
+		name     string
+		url      string
+		strategy string
+		value    string
+		want     string
+		wantErr  string
+	}{
+		{name: "ip body passes ip strategy", url: ipServer.URL, strategy: models.StrategyIP, want: "active"},
+		{name: "html body fails ip strategy", url: htmlServer.URL, strategy: models.StrategyIP, want: "failed", wantErr: "body does not contain an IP address"},
+		{name: "empty strategy normalizes to ip", url: htmlServer.URL, strategy: "", want: "failed", wantErr: "body does not contain an IP address"},
+		{name: "status strategy keeps status-code-only behavior", url: htmlServer.URL, strategy: models.StrategyStatus, want: "active"},
+		{name: "regex strategy applies the pattern", url: ipServer.URL, strategy: models.StrategyRegex, value: ipPattern, want: "active"},
+		{name: "regex strategy fails junk", url: htmlServer.URL, strategy: models.StrategyRegex, value: ipPattern, want: "failed", wantErr: "body does not match pattern"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h.setSettings(&models.HealthCheckSettings{
+				Timeout:       5,
+				Workers:       1,
+				URL:           tc.url,
+				Status:        http.StatusOK,
+				Strategy:      tc.strategy,
+				StrategyValue: tc.value,
+			})
 			result, err := h.CheckProxy(context.Background(), &models.Proxy{
 				ID:       1,
 				Address:  proxyAddr,
@@ -204,6 +287,7 @@ func TestCheckProxyManualImmediate(t *testing.T) {
 	liveID := insertTestProxy(t, db.Pool, "10.0.0.10:8080", "failed")
 	h.setSettings(&models.HealthCheckSettings{
 		Timeout: 5, Workers: 1, URL: targetURL, Status: http.StatusOK,
+		Strategy: models.StrategyStatus, // test target answers with an empty body
 	})
 
 	res, err := h.CheckProxy(context.Background(), &models.Proxy{
@@ -254,6 +338,7 @@ func TestCheckProxyPeriodicConsecutive(t *testing.T) {
 	dead := &models.Proxy{ID: id, Address: deadAddr, Protocol: "http"}
 	h.setSettings(&models.HealthCheckSettings{
 		Timeout: 5, Workers: 1, URL: "http://127.0.0.1:9", Status: http.StatusOK,
+		Strategy: models.StrategyStatus,
 	})
 
 	fail := func() {
@@ -285,6 +370,7 @@ func TestCheckProxyPeriodicConsecutive(t *testing.T) {
 	liveAddr, targetURL := newLiveProxyTarget(t)
 	h.setSettings(&models.HealthCheckSettings{
 		Timeout: 5, Workers: 1, URL: targetURL, Status: http.StatusOK,
+		Strategy: models.StrategyStatus, // test target answers with an empty body
 	})
 	res, err := h.CheckProxy(context.Background(), &models.Proxy{
 		ID: id, Address: liveAddr, Protocol: "http",

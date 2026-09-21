@@ -1,5 +1,37 @@
 basePath: /api/v1
 definitions:
+  checkstats.CleanupMetrics:
+    properties:
+      force:
+        $ref: '#/definitions/checkstats.ForceCleanupSnapshot'
+      log:
+        $ref: '#/definitions/checkstats.LogCleanupSnapshot'
+      proxy:
+        $ref: '#/definitions/checkstats.ProxyCleanupSnapshot'
+    type: object
+  checkstats.CleanupStatus:
+    enum:
+    - idle
+    - ok
+    - error
+    type: string
+    x-enum-varnames:
+    - CleanupStatusIdle
+    - CleanupStatusOK
+    - CleanupStatusError
+  checkstats.ForceCleanupSnapshot:
+    properties:
+      deleted_proxies:
+        type: integer
+      last_duration_ms:
+        type: integer
+      last_error:
+        type: string
+      last_run_at:
+        type: string
+      last_status:
+        $ref: '#/definitions/checkstats.CleanupStatus'
+    type: object
   checkstats.GlobalHealthCheckSnapshot:
     properties:
       enabled:
@@ -33,6 +65,48 @@ definitions:
     - GlobalHealthCheckStatusIdle
     - GlobalHealthCheckStatusOK
     - GlobalHealthCheckStatusError
+  checkstats.LogCleanupSnapshot:
+    properties:
+      compression_after_days:
+        type: integer
+      enabled:
+        type: boolean
+      last_duration_ms:
+        type: integer
+      last_error:
+        type: string
+      last_run_at:
+        type: string
+      last_status:
+        $ref: '#/definitions/checkstats.CleanupStatus'
+      next_run_at:
+        type: string
+      retention_days:
+        type: integer
+    type: object
+  checkstats.ProxyCleanupSnapshot:
+    properties:
+      cleanup_interval_hours:
+        type: integer
+      deleted_proxies:
+        type: integer
+      enabled:
+        type: boolean
+      last_duration_ms:
+        type: integer
+      last_error:
+        type: string
+      last_run_at:
+        type: string
+      last_status:
+        $ref: '#/definitions/checkstats.CleanupStatus'
+      max_failed_days:
+        type: integer
+      min_success_rate:
+        type: number
+      next_run_at:
+        type: string
+    type: object
   checkstats.Snapshot:
     properties:
       checks_last_minute:
@@ -62,6 +136,23 @@ definitions:
       used:
         type: integer
     type: object
+  handlers.GeoMetrics:
+    properties:
+      batch_requests_last_minute:
+        type: integer
+      batch_requests_limit:
+        type: integer
+      ips_updated_last_10m:
+        type: integer
+      provider:
+        type: string
+      queue_pending:
+        type: integer
+      queued_in_memory:
+        type: integer
+      usage_percent_1m:
+        type: number
+    type: object
   handlers.MemoryMetrics:
     properties:
       available:
@@ -88,10 +179,14 @@ definitions:
     type: object
   handlers.SystemMetrics:
     properties:
+      cleanup:
+        $ref: '#/definitions/checkstats.CleanupMetrics'
       cpu:
         $ref: '#/definitions/handlers.CPUMetrics'
       disk:
         $ref: '#/definitions/handlers.DiskMetrics'
+      geo:
+        $ref: '#/definitions/handlers.GeoMetrics'
       global_health_check:
         $ref: '#/definitions/checkstats.GlobalHealthCheckSnapshot'
       health_check:
@@ -263,11 +358,25 @@ definitions:
         description: IdleTTLMinutes is the same TTL filter for idle-orphan sweeps.
         type: integer
       orphan_ttl_minutes:
-        description: OrphanTTLMinutes excludes orphan proxies checked more recently
-          than now()-TTL from periodic orphan sweeps (0 disables the filter).
+        description: |-
+          OrphanTTLMinutes excludes orphan proxies checked more recently than
+          now()-TTL from periodic orphan sweeps (0 disables the filter).
         type: integer
       status:
         type: integer
+      strategy:
+        description: |-
+          Strategy selects how the health-check response body is validated after
+          the status-code check (see Strategy* constants). Empty normalizes to
+          StrategyIP when settings are loaded, so the default is "body must
+          contain an IP" — catches proxies that answer the check URL with a valid
+          status code but junk body (captive-portal HTML, login pages).
+        type: string
+      strategy_value:
+        description: |-
+          StrategyValue is the value for the StrategyContains / StrategyRegex
+          strategies (substring / Go regex); unused by the other strategies.
+        type: string
       strict_tls:
         description: Enable real TLS certificate validation during health checks
         type: boolean
@@ -835,6 +944,8 @@ paths:
   /metrics/system:
     get:
       description: Get current system resource metrics (CPU, memory, disk, runtime)
+        plus optional background-pipeline sections (health_check, global_health_check,
+        geo, cleanup)
       produces:
       - application/json
       responses:

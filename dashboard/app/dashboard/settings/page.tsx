@@ -348,6 +348,41 @@ export default function SettingsPage() {
           <Field id="healthcheck-workers" label="Workers" hint="Concurrent checks.">
             <Input id="healthcheck-workers" type="number" min={1} value={settings.healthcheck.workers} onChange={(e) => patch("healthcheck", { workers: num(e.target.value) })} />
           </Field>
+          <Field
+            id="healthcheck-strategy"
+            label="Body strategy"
+            hint="How the response body is validated after the status code. Marks proxies failed when they answer with junk (HTML captive-portal pages) instead of the expected payload. Applies to all health checks, including pool checks."
+          >
+            <Select
+              value={settings.healthcheck.strategy ?? "ip"}
+              onValueChange={(v) => patch("healthcheck", { strategy: v, strategy_value: "" })}
+            >
+              <SelectTrigger id="healthcheck-strategy" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ip">IP in response</SelectItem>
+                <SelectItem value="status">Status code only</SelectItem>
+                <SelectItem value="contains">Contains substring</SelectItem>
+                <SelectItem value="regex">Matches regular expression</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {(settings.healthcheck.strategy === "contains" || settings.healthcheck.strategy === "regex") && (
+            <Field
+              id="healthcheck-strategy-value"
+              label={settings.healthcheck.strategy === "regex" ? "Body regex" : "Body substring"}
+              hint={settings.healthcheck.strategy === "regex" ? "Go regex the response body must match." : "Substring the response body must contain."}
+            >
+              <Input
+                id="healthcheck-strategy-value"
+                className="font-mono"
+                placeholder={settings.healthcheck.strategy === "regex" ? "^\\d{1,3}(\\.\\d{1,3}){3}\\s*$" : "OK"}
+                value={settings.healthcheck.strategy_value ?? ""}
+                onChange={(e) => patch("healthcheck", { strategy_value: e.target.value })}
+              />
+            </Field>
+          )}
           <Field id="healthcheck-headers" label="Headers" hint="One per line, as Key: Value." className="sm:col-span-2 lg:col-span-3">
             <Textarea
               id="healthcheck-headers"

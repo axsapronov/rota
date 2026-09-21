@@ -184,6 +184,8 @@ export interface Settings {
     status: number
     headers: string[]
     strict_tls: boolean
+    strategy?: string
+    strategy_value?: string
   }
   global_health_check: {
     enabled: boolean
