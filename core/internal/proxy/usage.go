@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -258,6 +259,11 @@ func (t *UsageTracker) flush(ctx context.Context, batch []RequestRecord) {
 
 	// 2. Aggregate per proxy in arrival order.
 	order, aggs := aggregateRecords(batch)
+
+	// Acquire row locks in ascending proxy-id order — the same global lock
+	// order as ResultWriter — so the two batch writers updating the same
+	// proxies can never deadlock.
+	sort.Ints(order)
 
 	// 3. One UPDATE per proxy, pipelined in a single batch (one round-trip).
 	b := &pgx.Batch{}

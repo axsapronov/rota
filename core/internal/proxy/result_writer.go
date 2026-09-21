@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -283,6 +284,10 @@ func (w *ResultWriter) batchWriter() {
 // and must never fail the health checks that produced the records.
 func (w *ResultWriter) flush(ctx context.Context, batch []CheckResultRecord) {
 	order, aggs := aggregateCheckResults(batch)
+	// Acquire row locks in ascending proxy-id order. UsageTracker flushes the
+	// same rows; a shared global lock order makes lock-order inversion (and
+	// the resulting Postgres deadlocks / 15s flush timeouts) impossible.
+	sort.Ints(order)
 
 	b := &pgx.Batch{}
 	for _, id := range order {
