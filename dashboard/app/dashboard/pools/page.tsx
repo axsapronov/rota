@@ -58,6 +58,10 @@ const ROTATION_LABELS: Record<string, string> = {
 
 const FLAG = (cc: string) => `https://flagcdn.com/16x12/${cc.toLowerCase()}.png`
 
+// Batch size for the pool members list. Members stream in page by page
+// instead of loading a pool's whole membership at once.
+const POOL_PAGE_SIZE = 100
+
 const DEFAULT_POOL_FORM: CreatePoolRequest = {
   name: "",
   description: "",
@@ -90,6 +94,8 @@ function PoolsPage() {
   // Detail
   const [poolProxies, setPoolProxies] = useState<PoolProxy[]>([])
   const [poolProxiesLoading, setPoolProxiesLoading] = useState(false)
+  const [poolTotal, setPoolTotal] = useState(0)
+  const [poolLoadingMore, setPoolLoadingMore] = useState(false)
   const [hcJob, setHcJob] = useState<HCJob | null>(null)
   const [hcRunning, setHcRunning] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -97,6 +103,10 @@ function PoolsPage() {
   // Tracks the most recently requested pool so a slower response for an older
   // selection can't overwrite a newer one.
   const selectedPoolReqRef = useRef<number | null>(null)
+  // Tracks which member page is loaded and whether a "load more" fetch is in
+  // flight, so rapid scroll events can't stack duplicate requests.
+  const membersPageRef = useRef(1)
+  const membersBusyRef = useRef(false)
 
   // Dialogs
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -168,10 +178,15 @@ function PoolsPage() {
   const loadDetail = useCallback(async (poolId: number) => {
     setPoolProxiesLoading(true)
     selectedPoolReqRef.current = poolId
+    membersPageRef.current = 1
     try {
-      const [proxiesRes, rules] = await Promise.all([api.getPoolProxies(poolId), api.getAlertRules(poolId).catch(() => [])])
+      const [proxiesRes, rules] = await Promise.all([
+        api.getPoolProxies(poolId, 1, POOL_PAGE_SIZE),
+        api.getAlertRules(poolId).catch(() => []),
+      ])
       if (selectedPoolReqRef.current !== poolId) return
       setPoolProxies(proxiesRes.proxies)
+      setPoolTotal(proxiesRes.pagination.total)
       setAlertRules(rules)
     } catch {
       if (selectedPoolReqRef.current !== poolId) return
@@ -180,6 +195,37 @@ function PoolsPage() {
       if (selectedPoolReqRef.current === poolId) setPoolProxiesLoading(false)
     }
   }, [])
+
+  // Fetches the next batch of members and appends it. Triggered by scrolling
+  // to the bottom of the members list or the "Load more" button.
+  const loadMoreMembers = useCallback(async (poolId: number) => {
+    if (membersBusyRef.current) return
+    const nextPage = membersPageRef.current + 1
+    membersBusyRef.current = true
+    setPoolLoadingMore(true)
+    try {
+      const res = await api.getPoolProxies(poolId, nextPage, POOL_PAGE_SIZE)
+      if (selectedPoolReqRef.current !== poolId) return
+      setPoolProxies((prev) => [...prev, ...res.proxies])
+      setPoolTotal(res.pagination.total)
+      membersPageRef.current = nextPage
+    } catch {
+      // Keep the current list; the next scroll or button press retries.
+    } finally {
+      membersBusyRef.current = false
+      setPoolLoadingMore(false)
+    }
+  }, [])
+
+  const onMembersScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      const el = e.currentTarget
+      if (el.scrollTop + el.clientHeight < el.scrollHeight - 80) return
+      if (poolProxies.length >= poolTotal) return
+      if (selectedId) loadMoreMembers(selectedId)
+    },
+    [poolProxies.length, poolTotal, selectedId, loadMoreMembers]
+  )
 
   useEffect(() => {
     // A health-check poll belongs to the pool it was started on.
@@ -404,6 +450,7 @@ function PoolsPage() {
     try {
       await api.removePoolProxies(selectedPool.id, [proxyId])
       setPoolProxies((prev) => prev.filter((p) => p.proxy_id !== proxyId))
+      setPoolTotal((t) => Math.max(0, t - 1))
       loadAll()
     } catch {
       toast.error("Failed to remove proxy")
@@ -662,7 +709,7 @@ function PoolsPage() {
                     <div className="border-border border-b px-4 py-5 md:px-6">
                       <div className="mb-3 flex items-baseline justify-between gap-4">
                         <h3 className="label">
-                          Members <span className="num">({count(poolProxies.length)})</span>
+                          Members <span className="num">({count(poolProxies.length)}{poolTotal > poolProxies.length && ` of ${count(poolTotal)}`})</span>
                         </h3>
                         <Button variant="outline" size="sm" onClick={openPicker}>
                           Add proxies
@@ -673,7 +720,7 @@ function PoolsPage() {
                       ) : poolProxies.length === 0 ? (
                         <p className="text-muted-foreground py-6 text-center">No members. Sync to fill from filters, or add proxies by hand.</p>
                       ) : (
-                        <div className="max-h-[24rem] overflow-y-auto">
+                        <div className="max-h-[24rem] overflow-y-auto" onScroll={onMembersScroll}>
                           <Table>
                             <TableHeader>
                               <TableRow>
@@ -715,6 +762,13 @@ function PoolsPage() {
                               ))}
                             </TableBody>
                           </Table>
+                          {poolProxies.length < poolTotal && (
+                            <div className="border-border border-t p-2 text-center">
+                              <Button variant="outline" size="sm" onClick={() => loadMoreMembers(selectedPool.id)} disabled={poolLoadingMore}>
+                                {poolLoadingMore ? "Loading…" : `Load ${count(Math.min(POOL_PAGE_SIZE, poolTotal - poolProxies.length))} more`}
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
