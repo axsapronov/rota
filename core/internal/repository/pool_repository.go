@@ -224,47 +224,10 @@ func (r *PoolRepository) Delete(ctx context.Context, id int) error {
 	return err
 }
 
-// GetProxies returns all proxies for a given pool
+// GetProxies returns all proxies for a given pool (unpaginated).
 func (r *PoolRepository) GetProxies(ctx context.Context, poolID int) ([]models.PoolProxy, error) {
-	query := `
-		SELECT
-			p.id, p.address, p.protocol, p.username, p.password, p.status,
-			p.country_code, p.country_name, p.region_name, p.city_name, p.isp,
-			p.requests, p.successful_requests, p.failed_requests,
-			p.avg_response_time, p.last_check, ppm.added_at
-		FROM pool_proxies ppm
-		JOIN proxies p ON p.id = ppm.proxy_id
-		WHERE ppm.pool_id = $1
-		ORDER BY p.status, p.address
-	`
-	rows, err := r.db.Pool.Query(ctx, query, poolID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pool proxies: %w", err)
-	}
-	defer rows.Close()
-
-	var proxies []models.PoolProxy
-	for rows.Next() {
-		var pp models.PoolProxy
-		var succReq, failReq int64
-		err := rows.Scan(
-			&pp.ProxyID, &pp.Address, &pp.Protocol, &pp.Username, &pp.Password, &pp.Status,
-			&pp.CountryCode, &pp.CountryName, &pp.RegionName, &pp.CityName, &pp.ISP,
-			&pp.Requests, &succReq, &failReq,
-			&pp.AvgResponseTime, &pp.LastCheck, &pp.AddedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan pool proxy: %w", err)
-		}
-		if pp.Requests > 0 {
-			pp.SuccessRate = float64(succReq) / float64(pp.Requests) * 100
-		}
-		proxies = append(proxies, pp)
-	}
-	if proxies == nil {
-		proxies = []models.PoolProxy{}
-	}
-	return proxies, nil
+	proxies, _, err := r.GetProxiesPage(ctx, poolID, 0, 0)
+	return proxies, err
 }
 
 // GetProxiesPage returns one page of a pool's proxies together with the

@@ -107,6 +107,9 @@ function PoolsPage() {
   // flight, so rapid scroll events can't stack duplicate requests.
   const membersPageRef = useRef(1)
   const membersBusyRef = useRef(false)
+  // Bumped on every loadDetail so a "load more" still in flight can't append
+  // its stale rows onto the freshly reloaded list.
+  const membersReloadRef = useRef(0)
 
   // Dialogs
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -179,6 +182,7 @@ function PoolsPage() {
     setPoolProxiesLoading(true)
     selectedPoolReqRef.current = poolId
     membersPageRef.current = 1
+    membersReloadRef.current++
     try {
       const [proxiesRes, rules] = await Promise.all([
         api.getPoolProxies(poolId, 1, POOL_PAGE_SIZE),
@@ -201,12 +205,24 @@ function PoolsPage() {
   const loadMoreMembers = useCallback(async (poolId: number) => {
     if (membersBusyRef.current) return
     const nextPage = membersPageRef.current + 1
+    const reloadSeq = membersReloadRef.current
     membersBusyRef.current = true
     setPoolLoadingMore(true)
     try {
       const res = await api.getPoolProxies(poolId, nextPage, POOL_PAGE_SIZE)
-      if (selectedPoolReqRef.current !== poolId) return
-      setPoolProxies((prev) => [...prev, ...res.proxies])
+      // A loadDetail for this pool started while we were in flight: the list
+      // was reloaded, so dropping this stale page avoids duplicate rows.
+      if (selectedPoolReqRef.current !== poolId || membersReloadRef.current !== reloadSeq) return
+      if (res.proxies.length === 0) {
+        // Offset shifted under us (e.g. a member was removed): clamp the
+        // total to what we actually have so "load more" goes away.
+        setPoolTotal(Math.min(res.pagination.total, poolProxies.length))
+        return
+      }
+      setPoolProxies((prev) => {
+        const seen = new Set(prev.map((p) => p.proxy_id))
+        return [...prev, ...res.proxies.filter((p) => !seen.has(p.proxy_id))]
+      })
       setPoolTotal(res.pagination.total)
       membersPageRef.current = nextPage
     } catch {
@@ -215,7 +231,7 @@ function PoolsPage() {
       membersBusyRef.current = false
       setPoolLoadingMore(false)
     }
-  }, [])
+  }, [poolProxies.length])
 
   const onMembersScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
